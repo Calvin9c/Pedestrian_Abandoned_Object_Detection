@@ -1,11 +1,31 @@
 import os
-from tqdm import tqdm
 from natsort import natsorted
 
+import numpy as np
 import cv2
 import pybgs as bgs
-import numpy as np
 
+def create_debug_folders(vid_name):
+
+    '''
+        lightweight_denoise 分成三流程
+        1. 模糊、二值化
+        2. 消除小白點
+        3. 兩次膨脹
+    '''
+    os.makedirs(f"{vid_name}/debug/lightweight_denoise/first_process")
+    os.makedirs(f"{vid_name}/debug/lightweight_denoise/second_process")
+    os.makedirs(f"{vid_name}/debug/lightweight_denoise/third_process")
+
+    '''
+        denoise 分成兩流程
+        1. 模糊、二值化、一次膨脹
+        2. 刪除大面積雜訊
+    '''
+    os.makedirs(f"{vid_name}/debug/denoise/first_process")
+    os.makedirs(f"{vid_name}/debug/denoise/second_process")
+
+from tqdm import tqdm
 def modify_video(path2video, save_name=None, save_path="./result_modify_video", resize=False, resize_height=-1, resize_width=-1, frame_interval=1):
 
     if not os.path.exists(path2video):
@@ -52,7 +72,110 @@ def modify_video(path2video, save_name=None, save_path="./result_modify_video", 
     
     modified_vid.release()
 
-def bgs_generator(path2rgb):
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# predict.py, predict_update.py
+# 1. lightweight_denoise_for_mp
+# 2. denoise_if_detect_obj / denoise
+
+def lightweight_denoise_for_mp(mask, debug_mode=False, save_path=None, save_name=None, wh_area_threshold=150):
+
+    # save_path 設為 f"{vid_name}"
+    # save_name 設為 frame_idx
+
+    # 輸入為三通道的灰階圖片，輸出為單通道的圖片
+    # 流程：降躁 -> 灰階 -> 膨脹
+
+    try: # input: mask 是三通道的圖片
+        height, width, _ = mask.shape
+        mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
+    except: # input: mask 是二通道的圖片
+        height, width = mask.shape
+
+    if debug_mode:
+        assert not save_path==None
+        assert not save_name==None
+
+        debug_img = np.zeros((height, width, 3), np.uint8)
+
+        color = (0, 0, 255)
+        thickness = 2
+
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.8
+        font_thickness = 2
+
+    # first process: 模糊、二值化
+    mask = cv2.medianBlur(mask, 3)
+    _, mask = cv2.threshold(mask, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
+
+    # second_process: 刪除過小的白色區域
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8) # stats 記錄了所有連通白色區域的 BBoxes 訊息
+
+    # 移除 stats 異常區域
+    remove_idx, start = [], 0
+    while not(stats[start][0]==0 and stats[start][1]==0 and stats[start][2]==width and stats[start][3]==height):
+
+        remove_idx.append(start)
+
+        start += 1
+
+        if start==stats.shape[0]:
+            break
+
+    # 移除 stats 黑色區域
+    while stats[start][0]==0 and stats[start][1]==0 and stats[start][2]==width and stats[start][3]==height:
+
+        remove_idx.append(start)
+
+        start += 1
+
+        if start == stats.shape[0]:
+            break
+
+    ret_mask = np.zeros((height, width, 3), np.uint8)
+    for component_label in range(start, num_labels):
+
+        if stats[component_label][4] >= wh_area_threshold:
+
+            ret_mask[labels==component_label] = (255, 255, 255)
+
+            if debug_mode:
+                debug_bbox = stats[component_label]
+                x, y, w, h = debug_bbox[0], debug_bbox[1], debug_bbox[2], debug_bbox[3]
+                
+                debug_img[labels==component_label] = (255, 255, 255)
+                cv2.rectangle(debug_img, (x, y), (x+w, y+h), color, thickness)
+                cv2.putText(debug_img, f"{debug_bbox[4]}", (x, y - 10), font, font_scale, color, font_thickness)
+
+    # third_process: 膨脹*2
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)) 
+    ret_mask = cv2.cvtColor(ret_mask, cv2.COLOR_BGR2GRAY)
+    ret_mask = cv2.dilate(ret_mask, kernel, iterations=2)
+
+    if debug_mode: 
+        # first_process result
+        cv2.imwrite(f"{save_path}/debug/lightweight_denoise/first_process/{save_name}.png", cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR))
+        # second_process result
+        cv2.imwrite(f"{save_path}/debug/lightweight_denoise/second_process/{save_name}.png", debug_img)
+        # third_process result
+        cv2.imwrite(f"{save_path}/debug/lightweight_denoise/third_process/{save_name}.png", cv2.cvtColor(ret_mask, cv2.COLOR_GRAY2BGR))
+
+    return ret_mask
+
+def bgs_generator_with_denoise(path2rgb, queue, wh_area_threshold, debug_mode, save_path):
 
     cap = cv2.VideoCapture(path2rgb)
     if not cap.isOpened():
@@ -61,20 +184,233 @@ def bgs_generator(path2rgb):
 
     algorithm = bgs.ViBe()
 
-    pos_frame = cap.get(1)
     while True:
 
         rval, frame = cap.read()
 
+        frame_idx = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
+
         if rval:
-            pos_frame = cap.get(1)      
+ 
             img_output = algorithm.apply(frame)
             img_bgmodel = algorithm.getBackgroundModel()
-            yield img_output
 
+            # save_path 設為 f"{vid_name}", save_name 設為 frame_idx
+            img_output = lightweight_denoise_for_mp(img_output, debug_mode, save_path, save_name=frame_idx, wh_area_threshold=wh_area_threshold)
+
+            queue.put(img_output, block=True)
         else: break
     cap.release()
 
+def denoise_if_detect_obj(mask, debug_mode=False, save_path=None, save_name=None, wh_area_threshold=600):
+
+    # save_path 設為 vid_name
+    # save_name 設為 frame_idx
+
+    try: # input: mask 是三通道的圖片
+        height, width, _ = mask.shape
+        mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
+    except: # input: mask 是二通道的圖片
+        height, width = mask.shape
+
+    if debug_mode:
+        assert not save_path==None
+        assert not save_name==None
+
+        color = (0, 0, 255)
+        thickness = 2
+
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.5
+        font_thickness = 2
+
+        debug_img = np.zeros((height, width, 3), np.uint8)
+
+    # first_process: 模糊、二值化、膨脹
+    mask = cv2.medianBlur(mask, 3)
+    _, mask = cv2.threshold(mask, 0, 255, cv2.THRESH_BINARY) 
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))  
+    mask = cv2.dilate(mask, kernel, iterations=1)
+
+    # second_process: 刪除過小的白色區域
+    # cc_bboxes: x, y, w, h
+    num_labels, labels, cc_bboxes, _ = cv2.connectedComponentsWithStats(mask, connectivity=8) # stats 記錄了所有連通白色區域的 BBoxes 訊息
+
+    # 移除 cc_bboxes 中異常區域
+    start = 0
+    remove_labels = []  
+    while not (cc_bboxes[start][0]==0 and cc_bboxes[start][1]==0 and cc_bboxes[start][2]==width and cc_bboxes[start][3]==height):
+
+        remove_labels.append(start)
+
+        start += 1
+
+        if start==cc_bboxes.shape[0]: break
+
+    while cc_bboxes[start][0]==0 and cc_bboxes[start][1]==0 and cc_bboxes[start][2]==width and cc_bboxes[start][3]==height:
+
+        remove_labels.append(start)
+
+        start += 1
+
+        if start == cc_bboxes.shape[0]: break
+    
+    reserve_labels = []
+    ret_mask = np.zeros((height, width, 3), np.uint8)
+    for component_label in range(start, num_labels):
+
+        if cc_bboxes[component_label][4]>=wh_area_threshold: # 這個 if 有 Denoise 的效果
+            ret_mask[labels==component_label] = (255, 255, 255)
+            reserve_labels.append(component_label)
+
+            if debug_mode:
+
+                debug_bbox = cc_bboxes[component_label]
+                x, y, w, h = debug_bbox[0], debug_bbox[1], debug_bbox[2], debug_bbox[3]
+                
+                debug_img[labels==component_label] = (255, 255, 255)
+                cv2.rectangle(debug_img, (x, y), (x+w, y+h), color, thickness)
+                cv2.putText(debug_img, f"{debug_bbox[4]}", (x, y - 10), font, font_scale, color, font_thickness)
+
+        else: remove_labels.append(component_label)
+
+    if debug_mode: 
+        # first_process
+        cv2.imwrite(f"{save_path}/debug/denoise/first_process/{save_name}.png", cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR))
+        # second_process
+        cv2.imwrite(f"{save_path}/debug/denoise/second_process/{save_name}.png", debug_img)
+         
+    # 回傳內容如下
+    # 三通道的Denoise Mask: ret_mask
+    # 帶有label的二維陣列: labels
+    # 二次降躁前，所有連通域的bboxes: cc_bboxes
+    # 被保留的連通域清單: reserve_labels
+    # 後續將被刪除的連通域清單: remove_labels
+    return ret_mask, labels, cc_bboxes, reserve_labels, remove_labels
+    
+def denoise(mask, debug_mode=False, save_path=None, save_name=None, wh_area_threshold=600): 
+
+    # save_path 設為 vid_name / debug
+    # save_name 設為 frame_idx
+
+    try: # input: mask 是三通道的圖片
+        height, width, _ = mask.shape
+        mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
+    except: # input: mask 是二通道的圖片
+        height, width = mask.shape
+
+    if debug_mode:
+        assert not save_path==None
+        assert not save_name==None
+
+        color = (0, 0, 255)
+        thickness = 2
+
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.5
+        font_thickness = 2
+
+        debug_img = np.zeros((height, width, 3), np.uint8)
+
+    # first_process: 模糊、二值化、膨脹
+    mask = cv2.medianBlur(mask, 3)
+    _, mask = cv2.threshold(mask, 0, 255, cv2.THRESH_BINARY) 
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))  
+    mask = cv2.dilate(mask, kernel, iterations=1)
+
+    # second_process: 刪除過小的白色區域
+    num_labels, labels, cc_bboxes, _ = cv2.connectedComponentsWithStats(mask, connectivity=8) # stats 記錄了所有連通白色區域的 BBoxes 訊息
+
+    # 移除 cc_bboxes 中異常區域
+    remove_idx, start = [], 0 
+    while not (cc_bboxes[start][0]==0 and cc_bboxes[start][1]==0 and cc_bboxes[start][2]==width and cc_bboxes[start][3]==height):
+
+        remove_idx.append(start)
+
+        start+=1
+
+        if start==cc_bboxes.shape[0]: break
+
+    
+    while cc_bboxes[start][0]==0 and cc_bboxes[start][1]==0 and cc_bboxes[start][2]==width and cc_bboxes[start][3]==height:
+
+        remove_idx.append(start)
+
+        start+=1
+
+        if start==cc_bboxes.shape[0]: break
+
+    ret_mask = np.zeros((height, width, 3), np.uint8)
+
+    for component_label in range(start, num_labels):
+
+        if cc_bboxes[component_label][4]>=wh_area_threshold: # 這個 if 有 Denoise 的效果
+            ret_mask[labels==component_label] = (255, 255, 255)
+            
+            if debug_mode:
+                
+                debug_img[labels==component_label] = (255, 255, 255)
+
+                debug_bbox = cc_bboxes[component_label]
+                x, y, w, h = debug_bbox[0], debug_bbox[1], debug_bbox[2], debug_bbox[3]
+
+                cv2.rectangle(debug_img, (x, y), (x+w, y+h), color, thickness)
+                cv2.putText(debug_img, f"{debug_bbox[4]}", (x, y - 10), font, font_scale, color, font_thickness)
+
+        else:
+            remove_idx.append(component_label)
+
+    if debug_mode: 
+        # first_process
+        cv2.imwrite(f"{save_path}/debug/denoise/first_process/{save_name}.png", cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR))
+        # second_process
+        cv2.imwrite(f"{save_path}/debug/denoise/second_process/{save_name}.png", debug_img)
+    
+    cc_bboxes = np.delete(cc_bboxes, remove_idx, axis=0)
+    # 回傳三通道的ret_mask
+    return ret_mask, cc_bboxes
+
+# predict_update.py 刪除連通域用
+def del_cc_region(args):
+
+    yolo_bbox, component_label, cc_info = args
+
+    yolo_ul, yolo_lr = (int(yolo_bbox[0]), int(yolo_bbox[1])), (int(yolo_bbox[2]), int(yolo_bbox[3]))
+    yolo_area = (yolo_lr[0]-yolo_ul[0])*(yolo_lr[1]-yolo_ul[1]) # w*h
+
+    cc_ul, cc_lr = (cc_info[0], cc_info[1]), (cc_info[0]+cc_info[2], cc_info[1]+cc_info[3])
+
+    intersect_ul, intersect_lr = ( max(yolo_ul[0], cc_ul[0]), max(yolo_ul[1], cc_ul[1]) ), ( min(yolo_lr[0], cc_lr[0]), min(yolo_lr[1], cc_lr[1]) )
+    intersect_area = max(intersect_lr[0]-intersect_ul[0], 0)*max(intersect_lr[1]-intersect_ul[1], 0) # w*h
+
+    # yolo_mask為連通區域的subset
+    if intersect_area/yolo_area >= 0.9: # 配對成功
+        return component_label
+    return None
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# predict_wo_update.py
 def bgs_generator_for_mp(path2rgb, queue):
 
     cap = cv2.VideoCapture(path2rgb)
@@ -97,325 +433,7 @@ def bgs_generator_for_mp(path2rgb, queue):
         else: break
     cap.release()
 
-
-
-
-
-def lightweight_denoise_for_mp(mask, debug_mode=False, save_path=None, save_name=None, wh_area_threshold=150):
-
-    # save_path 設為 f"{vid_name}/debug"
-    # save_name 設為 frame_idx
-
-    # 輸入為三通道的灰階圖片，輸出為單通道的圖片
-    # 流程：降躁 -> 灰階 -> 膨脹
-
-    if debug_mode:
-        assert not save_path==None
-        assert not save_name==None
-
-        color = (0, 0, 255)
-        thickness = 2
-
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        font_scale = 0.8
-        font_thickness = 2
-
-        if not os.path.exists(save_path+"/debug/lightweight_denoise/first_process"): os.makedirs(save_path+"/debug/lightweight_denoise/first_process")
-        if not os.path.exists(save_path+"/debug/lightweight_denoise/second_process"): os.makedirs(save_path+"/debug/lightweight_denoise/second_process")
-
-    try: # input: mask 是三通道的圖片
-        height, width, _ = mask.shape
-        mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
-    except: # input: mask 是二通道的圖片
-        height, width = mask.shape
-
-    # first process: 模糊、二值化
-    mask = cv2.medianBlur(mask, 3)
-    _, mask = cv2.threshold(mask, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
-    if debug_mode: cv2.imwrite(f"{save_path}/debug/lightweight_denoise/first_process/{save_name}.png", cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR))
-
-    # 連通域處理
-    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8) # stats 記錄了所有連通白色區域的 BBoxes 訊息
-
-    # 移除 stats 異常區域
-    remove_idx, start = [], 0
-    while not(stats[start][0]==0 and stats[start][1]==0 and stats[start][2]==width and stats[start][3]==height):
-
-        remove_idx.append(start)
-
-        start+=1 # 下一個idx
-
-        if start==stats.shape[0]:
-            break
-
-    # 移除 stats 黑色區域
-    while stats[start][0]==0 and stats[start][1]==0 and stats[start][2]==width and stats[start][3]==height:
-
-        remove_idx.append(start)
-
-        start+=1 # 下一個idx
-
-        if start==stats.shape[0]:
-            break
-
-    # second_process: 刪除過小的白色區域
-    if debug_mode: debug_img = np.zeros((height, width, 3), np.uint8)
-
-    denoise_mask = np.zeros((height, width, 3), np.uint8) # initialize denoise_mask
-    for component_label in range(start, num_labels):
-
-        if stats[component_label][4] >= wh_area_threshold:
-
-            denoise_mask[labels==component_label] = (255, 255, 255)
-
-            if debug_mode:
-                debug_bbox = stats[component_label]
-                x, y, w, h = debug_bbox[0], debug_bbox[1], debug_bbox[2], debug_bbox[3]
-                
-                debug_img[labels==component_label] = (255, 255, 255)
-                cv2.rectangle(debug_img, (x, y), (x+w, y+h), color, thickness)
-                cv2.putText(debug_img, f"{debug_bbox[4]}", (x, y - 10), font, font_scale, color, font_thickness)
-
-    if debug_mode: cv2.imwrite(f"{save_path}/debug/lightweight_denoise/second_process/{save_name}.png", debug_img)
-
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)) 
-    denoise_mask = cv2.cvtColor(denoise_mask, cv2.COLOR_BGR2GRAY)
-    denoise_mask = cv2.dilate(denoise_mask, kernel, iterations=2)
-    
-    return denoise_mask
-
-
-
-
-def bgs_generator_with_denoise(path2rgb, queue, wh_area_threshold, debug_mode, save_path):
-
-    cap = cv2.VideoCapture(path2rgb)
-    if not cap.isOpened():
-        print(f"Fail to open {path2rgb}")
-        os._exit(0)
-
-    algorithm = bgs.ViBe()
-
-    while True:
-
-        rval, frame = cap.read()
-
-        frame_idx = cap.get(cv2.CAP_PROP_POS_FRAMES)
-
-        if rval:
- 
-            img_output = algorithm.apply(frame)
-            img_bgmodel = algorithm.getBackgroundModel()
-
-            # save_path 設為 f"{vid_name}/debug", save_name 設為 frame_idx
-            img_output = lightweight_denoise_for_mp(img_output, debug_mode, save_path, save_name=frame_idx, wh_area_threshold=wh_area_threshold)
-
-            queue.put(img_output, block=True)
-        else: break
-    cap.release()
-
-
-def denoise(mask, debug_mode=False, save_path=None, save_name=None, wh_area_threshold=600): 
-
-    # save_path 設為 vid_name / debug
-    # save_name 設為 frame_idx
-
-    if debug_mode:
-        assert not save_path==None
-        assert not save_name==None
-
-        color = (0, 0, 255)
-        thickness = 2
-
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        font_scale = 0.5
-        font_thickness = 2
-
-        if not os.path.exists(save_path+"/denoise/first_process"): os.makedirs(save_path+"/denoise/first_process")
-        if not os.path.exists(save_path+"/denoise/second_process"): os.makedirs(save_path+"/denoise/second_process")
-
-    try: # input: mask 是三通道的圖片
-        height, width, _ = mask.shape # 設定高、寬
-        mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
-    except: # input: mask 是二通道的圖片
-        height, width = mask.shape # 設定高、寬
-
-    # first_process: 模糊、二值化、膨脹
-    mask = cv2.medianBlur(mask, 3)
-    _, mask = cv2.threshold(mask, 0, 255, cv2.THRESH_BINARY) 
-
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))  
-    mask = cv2.dilate(mask, kernel, iterations=1)
-
-    if debug_mode: cv2.imwrite(f"{save_path}/denoise/first_process/{save_name}.png", cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR))
-
-    # 連通域處理
-    num_labels, labels, cc_bboxes, _ = cv2.connectedComponentsWithStats(mask, connectivity=8) # stats 記錄了所有連通白色區域的 BBoxes 訊息
-
-    # 移除 cc_bboxes 中異常區域
-    remove_idx, start = [], 0
-    tmp = cc_bboxes[start]    
-    while not (tmp[0]==0 and tmp[1]==0 and tmp[2]==width and tmp[3]==height):
-
-        remove_idx.append(start)
-
-        start+=1 # 下一個idx
-
-        # 保護機制
-        if start==cc_bboxes.shape[0]: break
-
-        tmp = cc_bboxes[start]
-    
-    while tmp[0]==0 and tmp[1]==0 and tmp[2]==width and tmp[3]==height:
-
-        remove_idx.append(start)
-
-        start+=1 # 下一個idx
-
-        # 保護機制
-        if start==cc_bboxes.shape[0]: break
-
-        tmp = cc_bboxes[start]
-
-    # second_process: 刪除過小的白色區域
-
-    denoise_mask = np.zeros((height, width, 3), np.uint8) # initialize denoise_mask
-    if debug_mode: debug_img = denoise_mask.copy()
-
-    for component_label in range(start, num_labels):
-
-        if cc_bboxes[component_label][4]>=wh_area_threshold: # 這個 if 有 Denoise 的效果
-            denoise_mask[labels==component_label] = (255, 255, 255)
-            
-            if debug_mode:
-                
-                debug_img[labels==component_label] = (255, 255, 255)
-
-                debug_bbox = cc_bboxes[component_label]
-                x, y, w, h = debug_bbox[0], debug_bbox[1], debug_bbox[2], debug_bbox[3]
-
-                cv2.rectangle(debug_img, (x, y), (x+w, y+h), color, thickness)
-                cv2.putText(debug_img, f"{debug_bbox[4]}", (x, y - 10), font, font_scale, color, font_thickness)
-
-        else:
-            remove_idx.append(component_label)
-
-
-    if debug_mode: cv2.imwrite(f"{save_path}/denoise/second_process/{save_name}.png", debug_img)
-    
-    cc_bboxes = np.delete(cc_bboxes, remove_idx, axis=0)
-    # 回傳三通道的Denoise Mask
-    return denoise_mask, cc_bboxes
-    
-def denoise_if_detect_obj(mask, debug_mode=False, save_path=None, save_name=None, wh_area_threshold=600):
-
-    # save_path 設為 vid_name / debug
-    # save_name 設為 frame_idx
-
-    if debug_mode:
-        assert not save_path==None
-        assert not save_name==None
-
-        color = (0, 0, 255)
-        thickness = 2
-
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        font_scale = 0.5
-        font_thickness = 2
-
-        if not os.path.exists(save_path+"/denoise/first_process"): os.makedirs(save_path+"/denoise/first_process")
-        if not os.path.exists(save_path+"/denoise/second_process"): os.makedirs(save_path+"/denoise/second_process")
-
-    try: # input: mask 是三通道的圖片
-        height, width, _ = mask.shape # 設定高、寬
-        mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
-    except: # input: mask 是二通道的圖片
-        height, width = mask.shape # 設定高、寬
-
-    # first_process: 模糊、二值化、膨脹
-    mask = cv2.medianBlur(mask, 3)
-    _, mask = cv2.threshold(mask, 0, 255, cv2.THRESH_BINARY) 
-
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))  
-    mask = cv2.dilate(mask, kernel, iterations=1)
-
-    if debug_mode: cv2.imwrite(f"{save_path}/denoise/first_process/{save_name}.png", cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR))
-
-    # 連通域處理
-    # cc_bboxes: x, y, w, h
-    num_labels, labels, cc_bboxes, _ = cv2.connectedComponentsWithStats(mask, connectivity=8) # stats 記錄了所有連通白色區域的 BBoxes 訊息
-
-    # 移除 cc_bboxes 中異常區域
-    start = 0
-    remove_labels = []  
-    while not (cc_bboxes[start][0]==0 and cc_bboxes[start][1]==0 and cc_bboxes[start][2]==width and cc_bboxes[start][3]==height):
-
-        remove_labels.append(start)
-
-        start+=1 # 下一個idx
-
-        if start==cc_bboxes.shape[0]: break
-
-    while cc_bboxes[start][0]==0 and cc_bboxes[start][1]==0 and cc_bboxes[start][2]==width and cc_bboxes[start][3]==height:
-
-        remove_labels.append(start)
-
-        start+=1 # 下一個idx
-
-        if start==cc_bboxes.shape[0]: break
-
-    # second_process: 刪除過小的白色區域
-    if debug_mode: debug_img = np.zeros((height, width, 3), np.uint8)
-
-    reserve_labels = []
-    denoise_mask = np.zeros((height, width, 3), np.uint8) # initialize denoise_mask
-    for component_label in range(start, num_labels):
-
-        if cc_bboxes[component_label][4]>=wh_area_threshold: # 這個 if 有 Denoise 的效果
-            denoise_mask[labels==component_label] = (255, 255, 255)
-            reserve_labels.append(component_label)
-
-            if debug_mode:
-
-                debug_bbox = cc_bboxes[component_label]
-                x, y, w, h = debug_bbox[0], debug_bbox[1], debug_bbox[2], debug_bbox[3]
-                
-                debug_img[labels==component_label] = (255, 255, 255)
-                cv2.rectangle(debug_img, (x, y), (x+w, y+h), color, thickness)
-                cv2.putText(debug_img, f"{debug_bbox[4]}", (x, y - 10), font, font_scale, color, font_thickness)
-
-        else: remove_labels.append(component_label)
-
-    if debug_mode: cv2.imwrite(f"{save_path}/denoise/second_process/{save_name}.png", debug_img)
-         
-    # 回傳內容如下
-    # 三通道的Denoise Mask: denoise_mask
-    # 帶有label的二維陣列: labels
-    # 二次降躁前，所有連通域的bboxes: cc_bboxes
-    # 被保留的連通域清單: reserve_labels
-    # 後續將被刪除的連通域清單: remove_labels
-    return denoise_mask, labels, cc_bboxes, reserve_labels, remove_labels
-
-def del_cc_region(args):
-
-    yolo_bbox, component_label, cc_info = args
-
-    yolo_ul, yolo_lr = (int(yolo_bbox[0]), int(yolo_bbox[1])), (int(yolo_bbox[2]), int(yolo_bbox[3]))
-    yolo_area = (yolo_lr[0]-yolo_ul[0])*(yolo_lr[1]-yolo_ul[1]) # w*h
-
-    cc_ul, cc_lr = (cc_info[0], cc_info[1]), (cc_info[0]+cc_info[2], cc_info[1]+cc_info[3])
-
-    intersect_ul, intersect_lr = ( max(yolo_ul[0], cc_ul[0]), max(yolo_ul[1], cc_ul[1]) ), ( min(yolo_lr[0], cc_lr[0]), min(yolo_lr[1], cc_lr[1]) )
-    intersect_area = max(intersect_lr[0]-intersect_ul[0], 0)*max(intersect_lr[1]-intersect_ul[1], 0) # w*h
-
-    # yolo_mask為連通區域的subset
-    if intersect_area/yolo_area >= 0.9: # 配對成功
-        return component_label
-    return None
-
 def lightweight_denoise_for_mp_update(mask, debug_mode=False, save_path=None, save_name=None, wh_area_threshold=150):
-
-    # For [ w/o update fg ]
 
     # save_path 設為 f"{vid_name}/debug"
     # save_name 設為 frame_idx
@@ -423,6 +441,12 @@ def lightweight_denoise_for_mp_update(mask, debug_mode=False, save_path=None, sa
     # 輸入為三通道圖片，輸出為單通道的圖片
     # 流程：模糊 -> 二值化 -> 刪除過小區域 -> 灰階 -> 膨脹
 
+    try: # input: mask 是三通道的圖片
+        height, width, _ = mask.shape
+        mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
+    except: # input: mask 是二通道的圖片
+        height, width = mask.shape
+
     if debug_mode:
         assert not save_path==None
         assert not save_name==None
@@ -434,49 +458,32 @@ def lightweight_denoise_for_mp_update(mask, debug_mode=False, save_path=None, sa
         font_scale = 0.8
         font_thickness = 2
 
+        debug_img = np.zeros((height, width, 3), np.uint8)
+
         if not os.path.exists(save_path+"/debug/lightweight_denoise/first_process"): os.makedirs(save_path+"/debug/lightweight_denoise/first_process")
         if not os.path.exists(save_path+"/debug/lightweight_denoise/second_process"): os.makedirs(save_path+"/debug/lightweight_denoise/second_process")
-
-    try: # input: mask 是三通道的圖片
-        height, width, _ = mask.shape
-        mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
-    except: # input: mask 是二通道的圖片
-        height, width = mask.shape
 
     # first process: 模糊、二值化
     mask = cv2.medianBlur(mask, 3)
     _, mask = cv2.threshold(mask, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
-    if debug_mode: cv2.imwrite(f"{save_path}/debug/lightweight_denoise/first_process/{save_name}.png", cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR))
 
-    # 連通域處理
+    # second_process: 刪除過小的白色區域
     num_labels, img_with_labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8) # stats 記錄了所有連通白色區域的 BBoxes 訊息
 
     # 移除 stats 異常區域
     start = 0
-    tmp = stats[start]
-    while not(tmp[0]==0 and tmp[1]==0 and tmp[2]==width and tmp[3]==height):
+    while not(stats[start][0]==0 and stats[start][1]==0 and stats[start][2]==width and stats[start][3]==height):
 
-        start+=1 # 下一個idx
+        start+=1
 
-        # 保護機制
-        if start==stats.shape[0]:
-            break
-
-        tmp = stats[start]
+        if start==stats.shape[0]: break
 
     # 移除 stats 黑色區域
-    while tmp[0]==0 and tmp[1]==0 and tmp[2]==width and tmp[3]==height:
+    while stats[start][0]==0 and stats[start][1]==0 and stats[start][2]==width and stats[start][3]==height:
 
-        start+=1 # 下一個idx
+        start+=1
 
-        # 保護機制
-        if start==stats.shape[0]:
-            break
-
-        tmp = stats[start]
-
-    # second_process: 刪除過小的白色區域
-    if debug_mode: debug_img = np.zeros((height, width, 3), np.uint8)
+        if start==stats.shape[0]: break
 
     valid_labels = []
     for component_label in range(start, num_labels):
@@ -493,10 +500,39 @@ def lightweight_denoise_for_mp_update(mask, debug_mode=False, save_path=None, sa
                 cv2.rectangle(debug_img, (x, y), (x+w, y+h), color, thickness)
                 cv2.putText(debug_img, f"{debug_bbox[4]}", (x, y - 10), font, font_scale, color, font_thickness)
 
-    if debug_mode: cv2.imwrite(f"{save_path}/debug/lightweight_denoise/second_process/{save_name}.png", debug_img)
+    if debug_mode: 
+        cv2.imwrite(f"{save_path}/debug/lightweight_denoise/first_process/{save_name}.png", cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR))
+        cv2.imwrite(f"{save_path}/debug/lightweight_denoise/second_process/{save_name}.png", debug_img)
     
     return img_with_labels, valid_labels, stats
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# Tracking
 def dilate_bbox(bbox, img_height, img_width, dilate_ratio=0.1):
     
     ul_x, ul_y = max(int(bbox[0]-bbox[2]*0.1), 0), max(int(bbox[1]-bbox[3]*0.1), 0)

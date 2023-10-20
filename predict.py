@@ -1,6 +1,4 @@
-# TorchReID
-from __future__ import print_function, division
-
+from __future__ import print_function, division # TorchReID Import
 
 # YOLOv5 🚀 by Ultralytics, GPL-3.0 license
 
@@ -29,43 +27,33 @@ Usage - formats:
                                           yolov5s-seg_edgetpu.tflite     # TensorFlow Edge TPU
 """
 
+# Append
+import time
+from natsort import natsorted
+import functions as our_funcs
+import multiprocessing
+multiprocessing.set_start_method('spawn', force=True)
+from multiprocessing import Process, Queue, Lock
+import concurrent.futures
+import json
+import numpy as np
+
+# Yolo Import
 import os
+import platform
 import sys
-# TorchReID
-sys.path.append("deep_person_reid")
 from pathlib import Path
+
+import torch
+import torch.backends.cudnn as cudnn
+
 FILE = Path(__file__).resolve()
 ROOT = FILE.parents[1] # YOLOv5 root directory
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))  # add ROOT to PATH
 ROOT = Path(os.path.relpath(ROOT, Path.cwd())) # relative
 
-import time
-
-# Usr Config
-import argparse
-from usr_config import tracking_config
-
-import functions as our_funcs
-
-import multiprocessing
-multiprocessing.set_start_method('spawn', force=True)
-from multiprocessing import Process, Queue, Lock
-
-from natsort import natsorted
-import json
-
-import numpy as np
-import math
-import cv2
-
-import platform
-
-import torch
-import torch.backends.cudnn as cudnn
-
 from models.common import DetectMultiBackend
-import torchvision.utils as utils
 from utils.dataloaders import IMG_FORMATS, VID_FORMATS, LoadImages, LoadStreams
 from utils.general import (LOGGER, Profile, check_file, check_img_size, check_imshow, check_requirements, colorstr, cv2,
                            increment_path, non_max_suppression, print_args, scale_coords, strip_optimizer, xyxy2xywh)
@@ -74,13 +62,17 @@ from utils.segment.general import process_mask, scale_masks, our_prcoess_bin_mas
 from utils.segment.plots import plot_masks, our_plot_masks
 from utils.torch_utils import select_device, smart_inference_mode
 
+# TorchReID Import
+# from __future__ import print_function, division
+# import torchvision.utils as utils
+# import sys
+sys.path.append("deep_person_reid")
 
 def cos_sim(a, b):
     a = np.mat(a)
     b = np.mat(b)
     return float(a * b.T) / (np.linalg.norm(a) * np.linalg.norm(b))
 
-# 以下是演算法組寫的（以上是reID model相關）
 def check_sizediff(box1, box2): 
     if box1[2]/box2[2] > 2 or box2[2]/box1[2] > 2 or box1[3]/box2[3] > 2 or box2[3]/box1[3] > 2:
         return True
@@ -112,6 +104,7 @@ def get_similarity(extractor, box1, box1_rgb, box2, box2_rgb):
 
     return sim_score
 
+import math
 def get_moved_dist(x_box, y_box):
     y_midpoint_x = y_box[0] + y_box[2]/2
     y_midpoint_y = y_box[1] + y_box[3]/2
@@ -203,9 +196,6 @@ def update_trackinglist(trackinglist_info, y_box):
 
 
 
-
-
-
 @smart_inference_mode()
 def run(
         # For Multiprocessing
@@ -215,6 +205,12 @@ def run(
         cc_del_info = None,
         lock_for_dict = None,
         run_yolo_only = False,
+
+        # Thresholds
+        debug_mode = False,
+        light_wh_area_th = 200, # lightweight_denoise 180
+        fg_wh_pixels_ratio_th = 0.15, # reinforce fg
+        wh_area_th = 600, # denoise
 
         # weights=ROOT / 'yolov5s-seg.pt',  # model.pt path(s)
         # weights=ROOT / 'yolov7s-seg.pt',  # model.pt path(s)
@@ -247,27 +243,6 @@ def run(
         dnn=False  # use OpenCV DNN for ONNX inference
 ):
 
-    # time record
-    time_record = [ 0, 0, 0, 0, 0, 0, 0]
-    # [0] model time
-    # [1] lightweight denoise
-    # [2] reinforce fg
-    # [3] 刪除連通域
-    # [4] predict
-    # [5] Wrt Dict
-    # [6] Proc_Mask
-
-
-   
-    # usr config
-    debug_mode = False
-
-    # Threshold    
-    # 23/10/03以前底下th設定分別為115, 0.15, 495
-    light_wh_area_th = 200 # lightweight_denoise 180
-    fg_wh_pixels_ratio_th = 0.15 # reinforce fg
-    wh_area_th = 600 # denoise
-
     video_name = source.split('/')[1]
 
     # 是否只需要跑yolo?
@@ -286,36 +261,15 @@ def run(
         save_pth_for_yolo_box = f"./{video_name}/yolo_npys"
         if not os.path.exists(save_pth_for_yolo_box): os.makedirs(save_pth_for_yolo_box)
 
+    # 創建資料夾
+    save_path_for_ghost_detect_dict = f"./{video_name}/dict"
+    if not os.path.exists(save_path_for_ghost_detect_dict): os.makedirs(save_path_for_ghost_detect_dict)
 
-
-
-
-    rgb_cap = cv2.VideoCapture(source)
-    if not rgb_cap.isOpened():
-        print(f"Fail to open {source}")
-        os._exit(0)
-    else:
-
-        fps = int(rgb_cap.get(cv2.CAP_PROP_FPS))
-        width, height = int(rgb_cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(rgb_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        rgb_cap.release()
-
-        # 創建資料夾
-        save_path_for_ghost_detect_dict = f"./{video_name}/dict"
-        if not os.path.exists(save_path_for_ghost_detect_dict): os.makedirs(save_path_for_ghost_detect_dict)
-
-        # 初始化 dict_for_ghost_detect
-        dict_for_ghost_detect = {}
-        with lock_for_dict:
-            with open(f"{save_path_for_ghost_detect_dict}/{video_name}.json", "w") as init_dict:
-                json.dump(dict_for_ghost_detect, init_dict)
-
-        if debug_mode:
-
-            if not os.path.exists(f"{video_name}/debug/aft_lightweight_denoise"): os.makedirs(f"{video_name}/debug/aft_lightweight_denoise")
-            
-            # 設定輸出的Mask影片
-            video_wrt = cv2.VideoWriter(f"./{video_name}/{video_name}.mp4", cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height))
+    # 初始化 dict_for_ghost_detect
+    dict_for_ghost_detect = {}
+    with lock_for_dict:
+        with open(f"{save_path_for_ghost_detect_dict}/{video_name}.json", "w") as init_dict:
+            json.dump(dict_for_ghost_detect, init_dict)
 
     save_img = not nosave and not source.endswith('.txt') # save inference images
 
@@ -330,7 +284,6 @@ def run(
     (save_dir / 'labels' if save_txt else save_dir).mkdir(parents=True, exist_ok=True)  # make dir
 
     # Load model
-    load_model_stime = time.time()
     device = select_device(device)
     model = DetectMultiBackend(weights, device=device, dnn=dnn, data=data, fp16=half)
     stride, names, pt = model.stride, model.names, model.pt
@@ -350,38 +303,36 @@ def run(
     # Run inference
     model.warmup(imgsz=(1 if pt else bs, 3, *imgsz))  # warmup
     seen, windows, dt = 0, [], (Profile(), Profile(), Profile())
-    load_model_etime = time.time()
-    time_record[0] += (load_model_etime-load_model_stime)
-    
 
+    setup_debug_video = False
     for frame_idx, (path, im, im0s, vid_cap, s) in enumerate(dataset):
 
         '''
-            type of path:    str
+            type of path:    str # 到影像資料的絕對路徑
             type of im:      np.array with shape CHW
             type of im0s:    np.array with shape HWC
             type of vid_cap: cv2.VideoCapture
-            type of s:       str
+            type of s:       str # Eg. s = f" video 1/1 (1/1226) {pth2video} or {pth2img} "
         '''
 
-        # using mp
-        now_rgb_frame = im0s.copy()
+        if not run_yolo_only: # 存RGB影像給Tracking調用
+            now_rgb_frame = im0s.copy()
+            rgb_frames.put(now_rgb_frame, block=True)
 
-        if not run_yolo_only:
-            rgb_frames.put(now_rgb_frame, block=True) # 存RGB影像給Tracking調用
+        if debug_mode and not setup_debug_video:
+            # 設定輸出的Mask影片
+            width, height = int(vid_cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(vid_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            video_wrt = cv2.VideoWriter(
+                f"./{video_name}/{video_name}.mp4",
+                cv2.VideoWriter_fourcc(*"mp4v"),
+                int(vid_cap.get(cv2.CAP_PROP_FPS)),
+                (width, height)
+            )
+            setup_debug_video = True
         
         bgs_frame = bgs_frames.get()
 
-        # lightweight_denoise_for_mp: 輸入為三通道的灰階圖片，輸出為單通道的圖片
-        ligth_wdenoise_stime = time.time()
-        bgs_frame = our_funcs.lightweight_denoise_for_mp(bgs_frame, debug_mode=debug_mode, save_path=f"{video_name}", save_name=f"{frame_idx}", wh_area_threshold=light_wh_area_th)
-        if debug_mode: cv2.imwrite(f"{video_name}/debug/aft_lightweight_denoise/{frame_idx}.png", cv2.cvtColor(bgs_frame, cv2.COLOR_GRAY2BGR))
-        ligth_wdenoise_etime = time.time()
-        time_record[1] += (ligth_wdenoise_etime-ligth_wdenoise_stime)
-
-        pred_stime = time.time()
         with dt[0]:
-
             im = torch.from_numpy(im).to(device)
             im = im.half() if model.fp16 else im.float()  # uint8 to fp16/32
             im /= 255  # 0 - 255 to 0.0 - 1.0
@@ -390,18 +341,13 @@ def run(
 
         # Inference
         with dt[1]:
-
             visualize = increment_path(save_dir / Path(path).stem, mkdir=True) if visualize else False
             pred, out = model(im, augment=augment, visualize=visualize)
             proto = out[1]
 
         # NMS
         with dt[2]:
-
             pred = non_max_suppression(pred, conf_thres, iou_thres, classes, agnostic_nms, max_det=max_det, nm=32)   
-        pred_etime = time.time() 
-        time_record[4] += (pred_etime-pred_stime)
-
 
         # Second-stage classifier (optional)
         # pred = utils.general.apply_classifier(pred, classifier_model, im, im0s)
@@ -416,8 +362,6 @@ def run(
             else:
                 p, im0, frame = path, im0s.copy(), getattr(dataset, 'frame', 0)
 
-            # p, im0, frame = path, im0s.copy(), getattr(dataset, 'frame', 0)
-
             p = Path(p)  # to Path
             save_path = str(save_dir / p.name)  # im.jpg
             txt_path = str(save_dir / 'labels' / p.stem) + ('' if dataset.mode == 'image' else f'_{frame}')  # im.txt
@@ -427,29 +371,23 @@ def run(
             imc = im0.copy() if save_crop else im0  # for save_crop
             annotator = Annotator(im0, line_width=line_thickness, example=str(names))
 
-            if len(det): # 進到len(det)，代表畫面中存在物件
-
-                proc_mask_stime = time.time()
+            if len(det): # 偵測到物件
 
                 masks = process_mask(proto[i], det[:, 6:], det[:, :4], im.shape[2:], upsample=True) # HWC
-                masks_cpu = reversed(masks.cpu()) # type(masks_cpu) 為 tensor
-                # num_objs = masks_cpu.shape[0] # torch.tensor.size = (C, H, W)
-
-                '''
-                    masks[i] 代表偵測到的第i個物體的mask
-                    masks_cpu.shape[0] 代表畫面中有幾個物體
-                '''
+                masks_cpu = reversed(masks.cpu()) # masks_cpu[obj_idx] 代表偵測到的第i個物體的mask, type(masks_cpu) 為 tensor
 
                 # Rescale boxes from img_size to im0 size
                 det[:, :4] = scale_coords(im.shape[2:], det[:, :4], im0.shape).round()
 
                 # Print results
-                for c in det[:, 5].unique():
-                    n = (det[:, 5] == c).sum()  # detections per class
-                    s += f"{n} {names[int(c)]}{'s' * (n > 1)}, "  # add to string
+                # for c in det[:, 5].unique():
+                #     n = (det[:, 5] == c).sum()  # detections per class
+                #     s += f"{n} {names[int(c)]}{'s' * (n > 1)}, "  # add to string
 
                 # Mask plotting
                 mcolors = [colors(int(cls), True) for cls in det[:, 5]] # 每個類別一種顏色
+
+                # num_objs = masks_cpu.shape[0] # torch.tensor.size = (C, H, W) # masks_cpu.shape[0] 代表畫面中有幾個物體
                 # mcolors = [colors(int(obj_idx), True) for obj_idx in range(num_objs)] # 每個物件一種顏色
                 
                 '''
@@ -464,77 +402,33 @@ def run(
                 '''
 
                 # im_masks, masks_color_summand = our_plot_masks(im[i], masks, mcolors) # image with masks shape(imh,imw,3)
-                im_masks, _ = our_plot_masks(im[i], masks, mcolors) # image with masks shape(imh,imw,3)
-
+                im_masks, _ = our_plot_masks(im[i], masks, mcolors)
                 annotator.im = scale_masks(im.shape[2:], im_masks, im0.shape) # scale to original h, w
 
                 # 將每張Masks的Padding部分刪除
                 masks_cpu = our_prcoess_bin_masks(masks_cpu, im.shape[2:], im0.shape) # now, masks_cpu is np.ndarray
 
-                proc_mask_etime = time.time()
-                time_record[6] += (proc_mask_etime-proc_mask_stime)
 
 
-                # 強化前景
-                reinforce_fg_stime = time.time()
-                denoise_mask = np.zeros((height, width), np.uint8)
+                # 強化前景. 根據前景進行BitwiseOr
+                yolo_bboxes = np.array([])
+                objs_in_fg = np.zeros((height, width), np.uint8)
                 for obj_idx, (*xyxy, conf, cls) in enumerate(reversed(det[:, :6])):
+                    # obj_cls = names[int(cls)]
+                    # bbox info: ul, lr = (int(xyxy[0]), int(xyxy[1])), (int(xyxy[2]), int(xyxy[3]))
+                    yolo_bboxes = np.append(yolo_bboxes, [int(xyxy[0]), int(xyxy[1]), int(xyxy[2]), int(xyxy[3])])
 
-                    # bbox info: ul, lr = (int(xyxy[0]), int(xyxy[1])), (int(xyxy[2]), int(xyxy[3]))                     
-                    entire_obj_mask = masks_cpu[obj_idx]                        
-                    yolo_white_pixels = np.count_nonzero( entire_obj_mask ) # Yolo的白點數量
+                    obj_mask = masks_cpu[obj_idx]
 
-                    if yolo_white_pixels==0: # 有時會出現"有物體BBox，Mask卻沒有白色區域"的狀況
-
-                        entire_obj_mask = np.zeros((height, width), np.uint8)
-
-                    else:
+                    yolo_white_pixels = np.count_nonzero( obj_mask ) # Yolo的白點數量
+                    if not yolo_white_pixels==0:
                         # 沒動的物體就不會被追蹤
-                        fg_white_pixels = np.count_nonzero( cv2.bitwise_and(entire_obj_mask, bgs_frame) ) # 物體佔前景的白點數 
+                        fg_white_pixels = np.count_nonzero( cv2.bitwise_and(obj_mask, bgs_frame) ) # 物體佔前景的白點數 
 
                         if fg_white_pixels/yolo_white_pixels < fg_wh_pixels_ratio_th: # 物體沒在動
                             # BGS在Box區域本來就是黑的, 卻被yolo偵測到
-                            entire_obj_mask = np.zeros((height, width), np.uint8)
-
-                    denoise_mask = cv2.bitwise_or(denoise_mask, entire_obj_mask)
-                denoise_mask = cv2.bitwise_or(denoise_mask, bgs_frame)
-                denoise_mask, labels, cc_bboxes, reserve_labels, remove_labels = our_funcs.denoise_if_detect_obj(denoise_mask, debug_mode=debug_mode, save_path=f"{video_name}/debug", save_name=f"{frame_idx}", wh_area_threshold=wh_area_th)
-                denoise_mask_copy = cv2.cvtColor(denoise_mask.copy(), cv2.COLOR_BGR2GRAY)
-                reinforce_fg_etime = time.time()
-                time_record[2] += (reinforce_fg_etime-reinforce_fg_stime)
-
-                del_fg_stime = time.time()
-                arr_for_ghost_detect = np.array([]) # arr_for_ghost_detect 就是yolo_bbox
-                cc_del = np.array([])
-                for obj_idx, (*xyxy, conf, cls) in enumerate(reversed(det[:, :6])):
-
-                    # Set up obj info
-                    # obj_cls = names[int(cls)]                        
-                    # ul, lr = (int(xyxy[0]), int(xyxy[1])), (int(xyxy[2]), int(xyxy[3]))
-
-                    arr_for_ghost_detect = np.append( arr_for_ghost_detect, [int(xyxy[0]), int(xyxy[1]), int(xyxy[2]), int(xyxy[3])] )
-                    entire_obj_mask = masks_cpu[obj_idx] 
-
-                    if not np.count_nonzero( cv2.bitwise_and(entire_obj_mask, denoise_mask_copy) )==0: # 物體在強化前景階段沒被刪除
-
-                        yolo_ul, yolo_lr = (int(xyxy[0]), int(xyxy[1])), (int(xyxy[2]), int(xyxy[3]))
-                        yolo_area = (yolo_lr[0]-yolo_ul[0])*(yolo_lr[1]-yolo_ul[1]) # w*h
-
-                        for component_label in reserve_labels: # 與cc_region配對
-
-                            cc_info = cc_bboxes[component_label] # x, y, w, h
-                            cc_ul, cc_lr = (cc_info[0], cc_info[1]), (cc_info[0]+cc_info[2], cc_info[1]+cc_info[3])
-
-                            intersect_ul, intersect_lr = ( max(yolo_ul[0], cc_ul[0]), max(yolo_ul[1], cc_ul[1]) ), ( min(yolo_lr[0], cc_lr[0]), min(yolo_lr[1], cc_lr[1]) )
-                            intersect_area = max(intersect_lr[0]-intersect_ul[0], 0)*max(intersect_lr[1]-intersect_ul[1], 0) # w*h
-
-                            # yolo_mask為連通區域的subset
-                            if intersect_area/yolo_area >= 0.9: # 配對成功
-
-                                cc_del = np.append(cc_del, [cc_info[0], cc_info[1], cc_info[2], cc_info[3]])
-
-                                denoise_mask[labels==component_label] = (0, 0, 0)
-                                remove_labels.append(component_label)
+                            obj_mask = np.zeros((height, width), np.uint8)
+                    objs_in_fg = cv2.bitwise_or(objs_in_fg, obj_mask)
 
                     # if save_txt: # Write to file
                     #     xywh = (xyxy2xywh(torch.tensor(xyxy).view(1, 4)) / gn).view(-1).tolist() # normalized xywh
@@ -542,31 +436,52 @@ def run(
                     #     with open(f'{txt_path}.txt', 'a') as f:
                     #         f.write(('%g ' * len(line)).rstrip() % line + '\n')
 
-                    if save_img or save_crop or view_img: # Add bbox to image
-                        c = int(cls) # integer class
-                        label = None if hide_labels else (names[c] if hide_conf else f'{names[c]} {conf:.2f}') # type(label) 為 string, label = person 0.94
+                    # if save_img or save_crop or view_img: # Add bbox to image
+                    #     c = int(cls) # integer class
+                    #     label = None if hide_labels else (names[c] if hide_conf else f'{names[c]} {conf:.2f}') # type(label) 為 string, label = person 0.94
 
-                        # 加入Yolo_BBox訊息
-                        annotator.box_label(xyxy, label, color=colors(c, True))
+                    #     # 加入Yolo_BBox訊息
+                    #     annotator.box_label(xyxy, label, color=colors(c, True))
 
-                    if save_crop:
-                        save_one_box(xyxy, imc, file=save_dir / 'crops' / names[c] / f'{p.stem}.jpg', BGR=True)
-                del_fg_etime = time.time()
-                time_record[3] += (del_fg_etime-del_fg_stime)
-
-                if debug_mode: video_wrt.write(denoise_mask)
+                    # if save_crop:
+                    #     save_one_box(xyxy, imc, file=save_dir / 'crops' / names[c] / f'{p.stem}.jpg', BGR=True)
+                bgs_frame = cv2.bitwise_or(objs_in_fg, bgs_frame)
+                yolo_bboxes = yolo_bboxes.reshape((-1, 4))
+                denoise_mask, img_with_labels, cc_bboxes, reserve_labels, remove_labels = our_funcs.denoise_if_detect_obj(bgs_frame, debug_mode=debug_mode, save_path=f"{video_name}", save_name=f"{frame_idx}", wh_area_threshold=wh_area_th)
 
                 '''
-                    cc BBox Info.: 
-                        1. [x, y, w, h]
-                    ----------  
                     yolo bboxes info.:
                         1. yolo_bboxes.shape = (num_objs, 4)
-                        2. yolo_bboxes[0] = [ ul_x, ul_y, lr_x, lr_y ]                
-                '''
+                        2. yolo_bboxes[0] = [ ul_x, ul_y, lr_x, lr_y ]
+                    ----------
+                    cc BBox Info.: 
+                        1. [x, y, w, h] 
+                ''' 
+
+                cc_del = np.array([])
+                for yolo_bbox in yolo_bboxes:
+
+                    yolo_ul, yolo_lr = (int(yolo_bbox[0]), int(yolo_bbox[1])), (int(yolo_bbox[2]), int(yolo_bbox[3]))
+                    yolo_area = (yolo_lr[0]-yolo_ul[0])*(yolo_lr[1]-yolo_ul[1]) # w*h
+
+                    for component_label in reserve_labels: # 與cc_region配對
+
+                        cc_info = cc_bboxes[component_label] # x, y, w, h
+                        cc_ul, cc_lr = (cc_info[0], cc_info[1]), (cc_info[0]+cc_info[2], cc_info[1]+cc_info[3])
+
+                        intersect_ul, intersect_lr = ( max(yolo_ul[0], cc_ul[0]), max(yolo_ul[1], cc_ul[1]) ), ( min(yolo_lr[0], cc_lr[0]), min(yolo_lr[1], cc_lr[1]) )
+                        intersect_area = max(intersect_lr[0]-intersect_ul[0], 0)*max(intersect_lr[1]-intersect_ul[1], 0) # w*h
+
+                        # yolo_mask為連通區域的subset
+                        if intersect_area/yolo_area >= 0.9: # 配對成功
+
+                            cc_del = np.append(cc_del, [cc_info[0], cc_info[1], cc_info[2], cc_info[3]])
+
+                            denoise_mask[img_with_labels==component_label] = (0, 0, 0)
+                            remove_labels.append(component_label)
 
                 # 將yolo_bbox寫入dict
-                arr_for_ghost_detect = arr_for_ghost_detect.reshape((-1, 4)) # arr_for_ghost_detect 就是yolo_bbox
+                arr_for_ghost_detect = yolo_bboxes.copy()
                 dict_for_ghost_detect[frame_idx] = arr_for_ghost_detect.tolist()
 
                 # 處理連通域相關的BBox
@@ -575,12 +490,7 @@ def run(
 
             else: # yolo沒有偵測到物件
 
-                reinforce_fg_stime = time.time()
-                bgs_frame, cc_bboxes = our_funcs.denoise(bgs_frame, debug_mode=debug_mode, save_path=f"{video_name}/debug", save_name=f"{frame_idx}", wh_area_threshold=wh_area_th)
-                if debug_mode: video_wrt.write(bgs_frame)
-                reinforce_fg_etime = time.time()
-                time_record[2] += (reinforce_fg_etime-reinforce_fg_stime)
-
+                denoise_mask, cc_bboxes = our_funcs.denoise(bgs_frame, debug_mode=debug_mode, save_path=f"{video_name}", save_name=f"{frame_idx}", wh_area_threshold=wh_area_th)
 
                 # 將yolo_bbox寫入dict
                 arr_for_ghost_detect = np.array([]) # yolo沒有偵測到物件
@@ -596,10 +506,12 @@ def run(
                 # np.save(f"{save_pth_for_del_cc}/{frame_idx}.npy", cc_del)
             else:
                 cc_bboxes_info.put(cc_bboxes, block=True)
-                cc_del_info.put(cc_del, block=True)  
+                cc_del_info.put(cc_del, block=True)
+            
+            if debug_mode: video_wrt.write(denoise_mask)
 
             # Stream results
-            im0 = annotator.result()
+            # im0 = annotator.result()
 
             # if view_img:
             #     if platform.system() == 'Linux' and p not in windows:
@@ -622,31 +534,20 @@ def run(
             #                 fps = vid_cap.get(cv2.CAP_PROP_FPS)
             #                 w = int(vid_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             #                 h = int(vid_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            #             # else:  # stream
-            #             #     fps, w, h = 30, im0.shape[1], im0.shape[0]
-            #             save_path = str(Path(save_path).with_suffix('.mp4'))  # force *.mp4 suffix on results videos
+            #             else:  # stream
+            #                 fps, w, h = 30, im0.shape[1], im0.shape[0]
+            #             save_path = str(Path(save_path).with_suffix('.mp4')) # force *.mp4 suffix on results videos
             #             vid_writer[i] = cv2.VideoWriter(save_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
             #         vid_writer[i].write(im0)
 
-        crit_sec_stime = time.time()
+        # Print time (inference-only)
+        # LOGGER.info(f"{s}{'' if len(det) else '(no detections), '}{dt[1].dt * 1E3:.1f}ms")
+
         # 每十幀Update一次 dict_for_ghost_detect
         if (frame_idx+1)%10==0:
             with lock_for_dict:
                 with open(f"{save_path_for_ghost_detect_dict}/{video_name}.json", "w") as updated_dict:
                     json.dump(dict_for_ghost_detect, updated_dict)
-        crit_sec_etime = time.time()
-        time_record[5] += (crit_sec_etime-crit_sec_stime)
-
-        # Print time (inference-only)
-        # LOGGER.info(f"{s}{'' if len(det) else '(no detections), '}{dt[1].dt * 1E3:.1f}ms")
-
-    record_content = ["Load_Model", "Lightweight_Denoise", "Reinforce_FG", "Del_CC", "Predict", "Wrt_Dict", "Proc_Mask"]
-    original_stdout = sys.stdout
-    with open(f"./{video_name}.txt", 'w') as file:
-        sys.stdout = file    
-        for rtime, record_content in zip(time_record, record_content):
-            print(f"{record_content}: {round(rtime, 4)}")
-    sys.stdout = original_stdout 
 
     # Print results
     # t = tuple(x.t / seen * 1E3 for x in dt)  # speeds per image
@@ -843,6 +744,7 @@ def tracking(args, video_name, save_path_for_dict, frame_count, rgb_frames, cc_b
             print("Too many box, reset tracking list")
             tracking_list.clear()
 
+# import argparse
 # def parse_opt(): # For yolo
 #     parser = argparse.ArgumentParser()
 #     parser.add_argument('--weights', nargs='+', type=str, default=ROOT / 'yolov5s-seg.pt', help='model path(s)')
@@ -876,67 +778,37 @@ def tracking(args, video_name, save_path_for_dict, frame_count, rgb_frames, cc_b
 #     print_args(vars(opt))
 #     return opt
 
+from usr_config import tracking_config
 def main():
 
     check_requirements(exclude=('tensorboard', 'thop'))
 
     # user config
-    use_table = False 
-
     frame_interval = 1 # 介於1~3之間。設為4，BGS的雜訊會太大
-
     run_yolo_only = True
 
-    # 影片10在不跳幀的狀況下，跑了快40分鐘
+    # Threshold
+    # 23/10/03以前底下th設定分別為115, 0.15, 495
+    debug_mode = True
+    light_wh_area_th = 200 # lightweight_denoise 180
+    fg_wh_pixels_ratio_th = 0.15 # reinforce fg
+    wh_area_th = 600 # denoise
 
-    if use_table: # 用vid_table
-
-        vid_table = [
-            "0_常見機車場景.mp4",
-            "1_常見機車場景.mp4",
-            "2_雨天迴轉.mp4",
-            "3_實驗室外走廊.mp4",
-            "4_工三外_少人.mp4",
-            "5_工三外_多人.mp4",
-            "6_短影片_修改第一幀.mp4",
-            "7_短影片_修改第一幀.mp4",
-            "8_短影片.mp4",
-            "9_短影片_修改第一幀.mp4",
-            "10_純雨天無垃圾.mp4",
-            "11_雨天中間距離丟垃圾.mp4",
-            "12_雨天近距離丟垃圾.mp4",
-            "13_雨天遠距離丟垃圾.mp4", # Bad
-            "14_人擋住垃圾.mp4",
-            "15_逗留.mp4",
-            "16_反覆提起垃圾.mp4",
-            "17_實驗室丟背包.mp4",
-            "18_影片.mp4",
-            "19_影片.mp4",
-            "20_尼斯湖.mp4",
-            "21_浴室.mp4",
-            "22_室外拍傘.mp4"
-        ]
-        
-        vid_need_process = []
-        assert not len(vid_need_process)==0
-
-    else: # 不用vid_table
-        vid_need_process = natsorted(os.listdir("./data/our_videos/rgb/"))
+    vid_need_process = natsorted(os.listdir("./data/our_videos/rgb/"))
 
     for vid_id in vid_need_process:
 
-
-        
-
-        
         # path2rgb指向原始的影片
-        path2rgb = f"./data/our_videos/rgb/{vid_table[vid_id]}" if use_table else f"./data/our_videos/rgb/{vid_id}"
+        path2rgb = f"./data/our_videos/rgb/{vid_id}"
 
         video_name = path2rgb.split('/')[-1]
         video_name = video_name.split('.')[0]
 
         our_funcs.modify_video(path2rgb, save_name=f"{video_name}_resize.mp4", save_path=f"./{video_name}", resize=False, resize_height=-1, resize_width=-1, frame_interval=frame_interval)
         
+        if debug_mode: 
+            our_funcs.create_debug_folders(video_name)
+
         source = f"./{video_name}/{video_name}_resize.mp4"
 
         rgb_cap = cv2.VideoCapture(source)
@@ -944,7 +816,7 @@ def main():
         rgb_cap.release()
 
         # Create Queue
-        bgs_frames = Queue(maxsize=100)
+        bgs_frames = Queue(maxsize=200)
 
         if run_yolo_only:
             rgb_frames = None
@@ -959,8 +831,8 @@ def main():
         lock_for_dict = Lock()
 
         # Setup the Processes
-        bgs_process = Process(target=our_funcs.bgs_generator_for_mp, args=(source, bgs_frames))
-        yolo_process = Process(target=run, args=(bgs_frames, rgb_frames, cc_bboxes_info, cc_del_info, lock_for_dict, run_yolo_only, ), kwargs={'source':source}) 
+        bgs_process = Process(target=our_funcs.bgs_generator_with_denoise, args=(source, bgs_frames, light_wh_area_th, debug_mode), kwargs={'save_path': f"{video_name}"})
+        yolo_process = Process(target=run, args=(bgs_frames, rgb_frames, cc_bboxes_info, cc_del_info, lock_for_dict, run_yolo_only, debug_mode, light_wh_area_th, fg_wh_pixels_ratio_th, wh_area_th,), kwargs={'source':source})
         if not run_yolo_only:
             save_path_for_dict = f"{video_name}/dict"
             tracking_process = Process(target=tracking, args=(tracking_config(), video_name, save_path_for_dict, frame_count, rgb_frames, cc_bboxes_info, cc_del_info, lock_for_dict))
@@ -968,18 +840,14 @@ def main():
         # 當run_yolo_only==False時，才要跑tracking_process
         bgs_process.start()
 
-        yolo_start_time = time.time()
         yolo_process.start()
         if not run_yolo_only:
             tracking_process.start()
 
         bgs_process.join()
         yolo_process.join()
-        yolo_end_time = time.time()
         if not run_yolo_only:
             tracking_process.join()
-
-        print(f"Execution time: {round(yolo_end_time - yolo_start_time, 4)}")
 
 if __name__ == "__main__":
     main()
