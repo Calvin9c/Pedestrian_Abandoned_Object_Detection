@@ -194,8 +194,6 @@ def update_trackinglist(trackinglist_info, y_box):
 
     return trackinglist_info
 
-
-
 @smart_inference_mode()
 def run(
         # For Multiprocessing
@@ -303,6 +301,8 @@ def run(
     model.warmup(imgsz=(1 if pt else bs, 3, *imgsz))  # warmup
     seen, windows, dt = 0, [], (Profile(), Profile(), Profile())
 
+    time_record = [0, 0, 0, 0, 0]
+    yolo_start_time = time.time()
     setup_debug_video = False
     for frame_idx, (path, im, im0s, vid_cap, s) in enumerate(dataset):
 
@@ -333,7 +333,7 @@ def run(
 
         with dt[0]:
             im = torch.from_numpy(im).to(device)
-            im = im.half() if model.fp16 else im.float()  # uint8 to fp16/32
+            im = im.half() if model.fp16 else im.float() # uint8 to fp16/32
             im /= 255  # 0 - 255 to 0.0 - 1.0
             if len(im.shape) == 3:
                 im = im[None]  # expand for batch dim
@@ -346,7 +346,7 @@ def run(
 
         # NMS
         with dt[2]:
-            pred = non_max_suppression(pred, conf_thres, iou_thres, classes, agnostic_nms, max_det=max_det, nm=32)   
+            pred = non_max_suppression(pred, conf_thres, iou_thres, classes, agnostic_nms, max_det=max_det, nm=32)
 
         # Second-stage classifier (optional)
         # pred = utils.general.apply_classifier(pred, classifier_model, im, im0s)
@@ -409,7 +409,10 @@ def run(
 
 
 
-                # 強化前景. 只要偵測到就進行BitwiseOr
+
+
+                # 強化前景. 無條件BitwiseOr
+                reinforce_fg_start_time = time.time()
                 yolo_bboxes = np.array([])
                 for obj_idx, (*xyxy, conf, cls) in enumerate(reversed(det[:, :6])):
                     # obj_cls = names[int(cls)]
@@ -436,7 +439,25 @@ def run(
                     # if save_crop:
                     #     save_one_box(xyxy, imc, file=save_dir / 'crops' / names[c] / f'{p.stem}.jpg', BGR=True)
                 yolo_bboxes = yolo_bboxes.reshape((-1, 4))
-                denoise_mask, img_with_labels, cc_bboxes, reserve_labels, remove_labels = our_funcs.denoise_if_detect_obj(bgs_frame, debug_mode=debug_mode, save_path=f"{video_name}", save_name=f"{frame_idx}", wh_area_threshold=wh_area_th)
+                reinforce_fg_end_time = time.time()
+                time_record[1] += round(reinforce_fg_end_time-reinforce_fg_start_time, 2)
+
+
+
+
+
+                # 二次降躁
+                sec_denoise_start_time = time.time()
+                if debug_mode:
+                    denoise_mask, img_with_labels, cc_bboxes, reserve_labels, remove_labels = our_funcs.denoise_if_detect_obj(bgs_frame, debug_mode=debug_mode, save_path=f"{video_name}", save_name=f"{frame_idx}", wh_area_threshold=wh_area_th)
+                else:
+                    cc_bboxes, reserve_labels, remove_labels = our_funcs.denoise_if_detect_obj(bgs_frame, debug_mode=debug_mode, save_path=f"{video_name}", save_name=f"{frame_idx}", wh_area_threshold=wh_area_th)
+                sec_denoise_end_time = time.time()
+                time_record[2] += round(sec_denoise_end_time-sec_denoise_start_time, 2)
+
+
+
+
 
                 '''
                     yolo bboxes info.:
@@ -447,6 +468,8 @@ def run(
                         1. [x, y, w, h] 
                 ''' 
 
+                # 使用偵測物體刪除連通域
+                delcc_start_time = time.time()
                 tasks = [
                     (yolo_bbox, component_label, cc_bboxes[component_label]) for yolo_bbox in yolo_bboxes for component_label in reserve_labels
                 ]
@@ -462,28 +485,49 @@ def run(
                         [cc_bboxes[component_label][0], cc_bboxes[component_label][1], cc_bboxes[component_label][2], cc_bboxes[component_label][3]]
                     )
 
-                    denoise_mask[img_with_labels==component_label] = (0, 0, 0)
                     remove_labels.append(component_label)
 
+                    if debug_mode:
+                        denoise_mask[img_with_labels==component_label] = (0, 0, 0)
+                delcc_end_time = time.time()
+                time_record[3] += round(delcc_end_time-delcc_start_time, 2)
+
+
+
+
+                data_proc_start_time = time.time()
                 # 將yolo_bbox寫入dict
                 arr_for_ghost_detect = yolo_bboxes.copy()
                 dict_for_ghost_detect[frame_idx] = arr_for_ghost_detect.tolist()
 
                 # 處理連通域相關的BBox
                 cc_bboxes = np.delete(cc_bboxes, remove_labels, axis=0)
-                cc_del = cc_del.reshape((-1, 4))          
+                cc_del = cc_del.reshape((-1, 4))
+                data_proc_end_time = time.time()
+                time_record[4] += round(data_proc_end_time-data_proc_start_time, 2)
 
             else: # yolo沒有偵測到物件
 
-                denoise_mask, cc_bboxes = our_funcs.denoise(bgs_frame, debug_mode=debug_mode, save_path=f"{video_name}", save_name=f"{frame_idx}", wh_area_threshold=wh_area_th)
+                # 二次降躁
+                sec_denoise_start_time = time.time()
+                if debug_mode:
+                    denoise_mask, cc_bboxes = our_funcs.denoise(bgs_frame, debug_mode=debug_mode, save_path=f"{video_name}", save_name=f"{frame_idx}", wh_area_threshold=wh_area_th)
+                else:
+                    cc_bboxes = our_funcs.denoise(bgs_frame, debug_mode=debug_mode, save_path=f"{video_name}", save_name=f"{frame_idx}", wh_area_threshold=wh_area_th)
+                sec_denoise_end_time = time.time()
+                time_record[2] += round(sec_denoise_end_time-sec_denoise_start_time, 2)
 
+                data_proc_start_time = time.time()
                 # 將yolo_bbox寫入dict
                 arr_for_ghost_detect = np.array([]) # yolo沒有偵測到物件
                 dict_for_ghost_detect[frame_idx] = arr_for_ghost_detect.tolist()
 
                 # 處理連通域相關的BBox
                 cc_del = np.array([]) # 沒有偵測到任何物件，不會有刪除連通域的問題
+                data_proc_end_time = time.time()
+                time_record[4] += round(data_proc_end_time-data_proc_start_time, 2)
 
+            data_proc_start_time = time.time()
             if run_yolo_only:
                 pass
                 # np.save(f"{save_pth_for_yolo_box}/{frame_idx}.npy", arr_for_ghost_detect)
@@ -492,8 +536,10 @@ def run(
             else:
                 cc_bboxes_info.put(cc_bboxes, block=True)
                 cc_del_info.put(cc_del, block=True)
-            
+
             if debug_mode: video_wrt.write(denoise_mask)
+            data_proc_end_time = time.time()
+            time_record[4] += round(data_proc_end_time-data_proc_start_time, 2)
 
             # Stream results
             # im0 = annotator.result()
@@ -528,11 +574,24 @@ def run(
         # Print time (inference-only)
         # LOGGER.info(f"{s}{'' if len(det) else '(no detections), '}{dt[1].dt * 1E3:.1f}ms")
 
+        data_proc_start_time = time.time()
         # 每十幀Update一次 dict_for_ghost_detect
         if (frame_idx+1)%10==0:
             with lock_for_dict:
                 with open(f"{save_path_for_ghost_detect_dict}/{video_name}.json", "w") as updated_dict:
                     json.dump(dict_for_ghost_detect, updated_dict)
+        data_proc_end_time = time.time()
+        time_record[4] += round(data_proc_end_time-data_proc_start_time, 2)
+
+    yolo_end_time = time.time()
+    time_record[0] += round(yolo_end_time-yolo_start_time, 2)
+
+    time_descriptions = ["總時長", "強化前景", "二次降躁", "使用物體刪除連通域", "處理Tracking_Data"]
+    with open(f'./{video_name}.txt', 'a') as file:
+
+        for rtime, time_description in zip(time_record, time_descriptions):
+            file.write(f"{time_description}: {rtime} sec\n")
+        file.write(f"\n------------------------------\n")
 
     # Print results
     # t = tuple(x.t / seen * 1E3 for x in dt)  # speeds per image
@@ -815,15 +874,42 @@ def main():
         lock_for_dict = Lock()
 
         # Setup the Processes
-        bgs_process = Process(target=our_funcs.bgs_generator_with_denoise, args=(source, bgs_frames, light_wh_area_th, debug_mode), kwargs={'save_path': f"{video_name}"})
-        yolo_process = Process(target=run, args=(bgs_frames, rgb_frames, cc_bboxes_info, cc_del_info, lock_for_dict, run_yolo_only, debug_mode, light_wh_area_th, wh_area_th,), kwargs={'source':source})
+        bgs_process = Process(
+            target=our_funcs.bgs_generator_with_denoise, 
+            args = (
+                source, 
+                bgs_frames, 
+                light_wh_area_th, 
+                debug_mode
+            ), 
+            kwargs = {
+                'save_path': f"{video_name}"
+            }
+        )
+
+        yolo_process = Process(
+            target=run, 
+            args = (
+                bgs_frames, 
+                rgb_frames, 
+                cc_bboxes_info, 
+                cc_del_info, 
+                lock_for_dict,
+                run_yolo_only, 
+                debug_mode, 
+                light_wh_area_th, 
+                wh_area_th,
+            ), 
+            kwargs = {
+                'source':source
+            }
+        )
         if not run_yolo_only:
             save_path_for_dict = f"{video_name}/dict"
             tracking_process = Process(target=tracking, args=(tracking_config(), video_name, save_path_for_dict, frame_count, rgb_frames, cc_bboxes_info, cc_del_info, lock_for_dict))
 
         # 當run_yolo_only==False時，才要跑tracking_process
         bgs_process.start()
-
         yolo_process.start()
         if not run_yolo_only:
             tracking_process.start()
