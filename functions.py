@@ -1,3 +1,4 @@
+import sys
 import os
 from natsort import natsorted
 
@@ -399,9 +400,76 @@ def del_cc_region(args):
 
 
 
+def my_connectedComponentsWithStats(img, area_threshold, debug_mode=False, save_path=None, save_name=None):
 
+    # ---------- 處理 input ---------- # 
 
+    if len(img.shape) == 2: # img 應為單通道
+        height, width = img.shape
+    else:
+        print("Input of my_connectedComponentsWithStats should be single channel.")
+        sys.exit(1)
 
+    if debug_mode:
+
+        assert not(save_path==None or save_name=None)
+
+        color = (0, 0, 255)
+        thickness = 2
+
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.5
+        font_thickness = 2
+
+        debug_img = np.zeros((height, width, 3), np.uint8)
+
+    # ---------- ---------- ---------- #
+
+    num_labels, img_with_labels, cc_bboxes, _ = cv2.connectedComponentsWithStats(img, connectivity=8)
+
+    inval_lbls, val_lbls = [], []
+    strt_idx = 0
+    while not (cc_bboxes[strt_idx][0]==0 and cc_bboxes[strt_idx][1]==0 and cc_bboxes[strt_idx][2]==width and cc_bboxes[strt_idx][3]==height):
+
+        inval_lbls.append(strt_idx)
+
+        strt_idx += 1
+
+        if strt_idx == cc_bboxes.shape[0]: break
+    
+    while cc_bboxes[strt_idx][0]==0 and cc_bboxes[strt_idx][1]==0 and cc_bboxes[strt_idx][2]==width and cc_bboxes[strt_idx][3]==height:
+
+        inval_lbls.append(strt_idx)
+
+        strt_idx += 1
+
+        if strt_idx == cc_bboxes.shape[0]: break
+
+    denoise_img = np.zeros((height, width), np.uint8)
+    for component_label in range(strt_idx, num_labels):
+        
+        if cc_bboxes[component_label][4]>=area_threshold:
+
+            denoise_img[img_with_labels==component_label] = 255
+            val_lbls.append(component_label)
+            
+            if debug_mode:
+                
+                debug_img[img_with_labels==component_label] = (255, 255, 255)
+
+                debug_bbox = cc_bboxes[component_label]
+                x, y, w, h = debug_bbox[0], debug_bbox[1], debug_bbox[2], debug_bbox[3]
+
+                cv2.rectangle(debug_img, (x, y), (x+w, y+h), color, thickness)
+                cv2.putText(debug_img, f"{debug_bbox[4]}", (x, y - 10), font, font_scale, color, font_thickness)
+
+        else:
+            inval_lbls.append(component_label)
+
+    if debug_mode: 
+        cv2.imwrite(f"{save_path}/debug/denoise/second_process/{save_name}.png", debug_img)
+
+    return denoise_img, img_with_labels, val_lbls, inval_lbls, cc_bboxes
 
 
 
@@ -419,9 +487,6 @@ def bgs_generator_for_mp(
         path2rgb,
 
         bgs_frames,
-        buf_img_w_lbl, # buffer for img_with_labels
-        buf_val_lbl, # buffer for valid_labels
-        buf_stats, # buffer for stats
 
         wh_area_threshold,
         debug_mode,
@@ -446,12 +511,9 @@ def bgs_generator_for_mp(
             img_bgmodel = algorithm.getBackgroundModel()
 
             # save_path 設為 f"{vid_name}", save_name 設為 frame_idx
-            bgs_frame, bgs_frame_with_labels, valid_labels, stats = lightweight_denoise_update(img_output, debug_mode, save_path, save_name=frame_idx, wh_area_threshold=wh_area_threshold)
+            bgs_frame = lightweight_denoise_update(img_output, debug_mode, save_path, frame_idx, wh_area_threshold)
 
             bgs_frames.put( bgs_frame, block=True )
-            buf_img_w_lbl.put( bgs_frame_with_labels, block=True )
-            buf_val_lbl.put( set(valid_labels), block=True )
-            buf_stats.put( stats, block=True )
 
         else: break
     cap.release()
@@ -488,38 +550,37 @@ def lightweight_denoise_update(mask, debug_mode=False, save_path=None, save_name
     _, mask = cv2.threshold(mask, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
 
     # second_process: 刪除過小的白色區域
-    num_labels, img_with_labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8) # stats 記錄了所有連通白色區域的 BBoxes 訊息
+    num_labels, img_with_labels, cc_bboxes, _ = cv2.connectedComponentsWithStats(mask, connectivity=8) # cc_bboxes 記錄了所有連通白色區域的 BBoxes 訊息
 
-    # 移除 stats 異常區域
+    # 移除 cc_bboxes 異常區域
     start = 0
-    while not(stats[start][0]==0 and stats[start][1]==0 and stats[start][2]==width and stats[start][3]==height):
+    while not(cc_bboxes[start][0]==0 and cc_bboxes[start][1]==0 and cc_bboxes[start][2]==width and cc_bboxes[start][3]==height):
 
         start+=1
 
-        if start==stats.shape[0]: break
+        if start==cc_bboxes.shape[0]: break
 
-    # 移除 stats 黑色區域
-    while stats[start][0]==0 and stats[start][1]==0 and stats[start][2]==width and stats[start][3]==height:
+    # 移除 cc_bboxes 黑色區域
+    while cc_bboxes[start][0]==0 and cc_bboxes[start][1]==0 and cc_bboxes[start][2]==width and cc_bboxes[start][3]==height:
 
         start+=1
 
-        if start==stats.shape[0]: break
-
-    valid_labels = []
+        if start==cc_bboxes.shape[0]: break
 
     bgs_frame = np.zeros((height, width), np.uint8)
     for component_label in range(start, num_labels):
 
-        if stats[component_label][4]>=wh_area_threshold:
+        if cc_bboxes[component_label][4]>=wh_area_threshold:
 
             bgs_frame[img_with_labels==component_label] = 255
-            valid_labels.append(component_label)
 
             if debug_mode:
-                debug_bbox = stats[component_label]
-                x, y, w, h = debug_bbox[0], debug_bbox[1], debug_bbox[2], debug_bbox[3]
 
                 debug_img[img_with_labels==component_label] = (255, 255, 255)
+
+                debug_bbox = cc_bboxes[component_label]
+                x, y, w, h = debug_bbox[0], debug_bbox[1], debug_bbox[2], debug_bbox[3]
+                
                 cv2.rectangle(debug_img, (x, y), (x+w, y+h), color, thickness)
                 cv2.putText(debug_img, f"{debug_bbox[4]}", (x, y - 10), font, font_scale, color, font_thickness)
 
@@ -527,7 +588,7 @@ def lightweight_denoise_update(mask, debug_mode=False, save_path=None, save_name
         cv2.imwrite(f"{save_path}/debug/lightweight_denoise/first_process/{save_name}.png", cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR))
         cv2.imwrite(f"{save_path}/debug/lightweight_denoise/second_process/{save_name}.png", debug_img)
     
-    # 當有偵測到物體時，會使用到 img_with_labels, valid_labels, stats
+    # 當有偵測到物體時，會使用到 img_with_labels, valid_labels, cc_bboxes
 
     # 當沒偵測到物體時，會使用到bgs_frame
     # bgs_frame 為單通道
@@ -536,7 +597,7 @@ def lightweight_denoise_update(mask, debug_mode=False, save_path=None, save_name
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
     bgs_frame = cv2.dilate(bgs_frame, kernel, iterations=3)
 
-    return bgs_frame, img_with_labels, valid_labels, stats
+    return bgs_frame
 
 
 def denoise_woufg(mask, debug_mode=False, save_path=None, save_name=None, wh_area_threshold=600): 
@@ -572,7 +633,7 @@ def denoise_woufg(mask, debug_mode=False, save_path=None, save_name=None, wh_are
     # mask = cv2.dilate(mask, kernel, iterations=1)
 
     # second_process: 刪除過小的白色區域
-    num_labels, labels, cc_bboxes, _ = cv2.connectedComponentsWithStats(mask, connectivity=8) # stats 記錄了所有連通白色區域的 BBoxes 訊息
+    num_labels, img_with_labels, cc_bboxes, _ = cv2.connectedComponentsWithStats(mask, connectivity=8) # stats 記錄了所有連通白色區域的 BBoxes 訊息
 
     # 移除 cc_bboxes 中異常區域
     remove_idx, start = [], 0 
@@ -583,7 +644,6 @@ def denoise_woufg(mask, debug_mode=False, save_path=None, save_name=None, wh_are
         start+=1
 
         if start==cc_bboxes.shape[0]: break
-
     
     while cc_bboxes[start][0]==0 and cc_bboxes[start][1]==0 and cc_bboxes[start][2]==width and cc_bboxes[start][3]==height:
 
@@ -593,13 +653,16 @@ def denoise_woufg(mask, debug_mode=False, save_path=None, save_name=None, wh_are
 
         if start==cc_bboxes.shape[0]: break
 
+    valid_labels = []
     for component_label in range(start, num_labels):
         
         if cc_bboxes[component_label][4]>=wh_area_threshold: # 這個 if 有 Denoise 的效果
+
+            valid_labels.append(component_label)
             
             if debug_mode:
                 
-                debug_img[labels==component_label] = (255, 255, 255)
+                debug_img[img_with_labels==component_label] = (255, 255, 255)
 
                 debug_bbox = cc_bboxes[component_label]
                 x, y, w, h = debug_bbox[0], debug_bbox[1], debug_bbox[2], debug_bbox[3]
@@ -610,17 +673,17 @@ def denoise_woufg(mask, debug_mode=False, save_path=None, save_name=None, wh_are
         else:
             remove_idx.append(component_label)
 
-    cc_bboxes = np.delete(cc_bboxes, remove_idx, axis=0)
-
     if debug_mode: 
         # first_process
         # cv2.imwrite(f"{save_path}/debug/denoise/first_process/{save_name}.png", cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR))
         # second_process
         cv2.imwrite(f"{save_path}/debug/denoise/second_process/{save_name}.png", debug_img)
-        # 回傳三通道的ret_mask
-        return debug_img, cc_bboxes
-    else: 
-        return cc_bboxes
+    
+    return img_with_labels, set(valid_labels), remove_idx, cc_bboxes
+
+
+
+        
 
 def del_cc_region_woufg(args):
 
