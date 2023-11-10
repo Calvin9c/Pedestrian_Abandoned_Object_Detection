@@ -204,8 +204,10 @@ def run(
         width,
 
         # Buffer for BGS Datum
-        bgs_frames = None,
-
+        buf_img_with_lbls = None,
+        buf_val_lbls = None,
+        buf_inval_lbls = None, 
+        buf_cc_bboxes = None,
 
         # Buffer for Tracking Process
         rgb_frames = None,
@@ -218,7 +220,6 @@ def run(
 
         # Thresholds
         debug_mode = False,
-        wh_area_th = 900, # denoise
 
         # 以上參數非Yolo原生
         # ---------- ---------- ---------- #
@@ -353,9 +354,10 @@ def run(
             rgb_frames.put(now_rgb_frame, block=True)
 
         # Get BGS datum from buffers
-        bgs_frame = bgs_frames.get()
-        # 二次降躁 
-        bgs_frame_with_labels, valid_labels, remove_idx, cc_bboxes = our_funcs.denoise_woufg(bgs_frame, debug_mode=debug_mode, save_path=f"{video_name}", save_name=f"{frame_idx}", wh_area_threshold=wh_area_th)
+        bgs_frame_with_labels = buf_img_with_lbls.get()
+        valid_labels = buf_val_lbls.get()
+        remove_idx = buf_inval_lbls.get()
+        cc_bboxes = buf_cc_bboxes.get()
         if debug_mode: plot_labels = valid_labels.copy()
 
         # 初始化傳遞給 Tracking_Process 的 Array
@@ -530,7 +532,7 @@ def run(
                 video_wrt.write( denoise_mask )
 
             data_proc_end_time = time.time()
-            time_record[4] += round(data_proc_end_time-data_proc_start_time, 2)
+            time_record[3] += round(data_proc_end_time-data_proc_start_time, 2)
 
             # ---------- ---------- ---------- # 
 
@@ -575,7 +577,7 @@ def run(
     yolo_end_time = time.time()
     time_record[0] += round(yolo_end_time-yolo_start_time, 2)
 
-    time_descriptions = ["總時長", "強化前景", "二次降躁", "使用物體刪除連通域", "處理Tracking_Data", "等待BGS_Frame時長"]
+    time_descriptions = ["總時長", "等待BGS_Frame時長", "使用物體刪除連通域", "處理Tracking_Data"]
     with open(f'./{video_name}.txt', 'a') as file:
 
         for rtime, time_description in zip(time_record, time_descriptions):
@@ -823,8 +825,8 @@ def main():
     # Threshold
     # 23/10/03以前底下th設定分別為115, 0.15, 495
     debug_mode = True
-    light_wh_area_th = 200 # lightweight_denoise 180
-    wh_area_th = 800 # denoise
+    sec_proc_area_th = 200 # lightweight_denoise 180
+    trd_proc_area_th = 800 # denoise
 
     vid_need_process = natsorted(os.listdir("./data/our_videos/rgb/"))
 
@@ -850,7 +852,10 @@ def main():
         rgb_cap.release()
 
         # Create Queue
-        bgs_frames = Queue(maxsize=100)
+        buf_img_with_lbls = Queue(maxsize=100)
+        buf_val_lbls = Queue(maxsize=100)
+        buf_inval_lbls = Queue(maxsize=100)
+        buf_cc_bboxes = Queue(maxsize=100)
 
         if run_yolo_only:
             rgb_frames = None
@@ -866,11 +871,20 @@ def main():
 
         # Setup the Processes
         bgs_process = Process(
-            target = our_funcs.bgs_generator_for_mp, 
+            target = our_funcs.bgs_generator, 
             args = (
+                # pth2vid
                 source, 
-                bgs_frames,
-                light_wh_area_th, 
+
+                # buf
+                buf_img_with_lbls,
+                buf_val_lbls,
+                buf_inval_lbls, 
+                buf_cc_bboxes,
+                
+                # Threshold
+                sec_proc_area_th,
+                trd_proc_area_th,
                 debug_mode
             ), 
             kwargs = {
@@ -888,7 +902,10 @@ def main():
                 width,
 
                 # Buffer for BGS Datum
-                bgs_frames,
+                buf_img_with_lbls,
+                buf_val_lbls,
+                buf_inval_lbls, 
+                buf_cc_bboxes,
 
                 # Buffer for Tracking Process
                 rgb_frames, 
@@ -900,8 +917,7 @@ def main():
                 run_yolo_only, 
 
                 # Thresholds
-                debug_mode, 
-                wh_area_th
+                debug_mode
             ), 
             kwargs = {
                 'source':source
