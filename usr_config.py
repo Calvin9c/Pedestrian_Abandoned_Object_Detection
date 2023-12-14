@@ -1,13 +1,5 @@
 import argparse
 
-def preprocess_config():
-    parser = argparse.ArgumentParser(description='Configure the thresholds of img preprocess.')
-    parser.add_argument('--light_wh_area_th', type=float, default=0.8, help='threshold for light_weight_denoise')
-    parser.add_argument('--fg_wh_pixels_ratio_th', type=float, default=0.98, help='threshold for reinforce fg')
-    parser.add_argument('--wh_area_th', type=float, default=0.7, help='threshold for denoise')
-
-    return parser.parse_args()
-
 def tracking_config():
     parser = argparse.ArgumentParser(description='Configure the thresholds of tracking phase.')
     parser.add_argument('--similarity_th', type=float, default=0.8, help='相似度達閥值當作同一物品')
@@ -23,3 +15,25 @@ def tracking_config():
     parser.add_argument('--reset_cnt', type=int, default=30, help='le of tracking list達到此數字，清空')
 
     return parser.parse_args()
+
+def get_cfg(video_name):
+    cfg = {
+        'frame_interval'        : 2, # 介於1~3之間，2為最佳。
+        'run_yolo_only'         : True,
+        'debug_mode'            : False,
+
+        'video_name'            : video_name,
+        'save_path_for_dict'    : f"{video_name}/dict",
+        'save_pth_for_res_cc'   : f"{video_name}/cc_res_npys",
+        'save_pth_for_del_cc'   : f"{video_name}/cc_del_npys",
+        'save_pth_for_yolo_box' : f"{video_name}/yolo_npys",
+
+        'sec_proc_area_th'      : 200, # lightweight_denoise
+        'trd_proc_area_th'      : 800, # denoise
+
+        'denoise_fst_proc'      : f"{video_name}/debug/denoise/first_process",
+        'denoise_sec_proc'      : f"{video_name}/debug/denoise/second_process",
+        'denoise_trd_proc'      : f"{video_name}/debug/denoise/third_process"
+    }
+    assert 1 <= cfg['frame_interval'] and cfg['frame_interval'] <= 3
+    return cfg
