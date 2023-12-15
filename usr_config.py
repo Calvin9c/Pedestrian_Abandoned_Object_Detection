@@ -36,4 +36,5 @@ def get_cfg(video_name):
         'denoise_trd_proc'      : f"{video_name}/debug/denoise/third_process"
     }
     assert 1 <= cfg['frame_interval'] and cfg['frame_interval'] <= 3
+
     return cfg

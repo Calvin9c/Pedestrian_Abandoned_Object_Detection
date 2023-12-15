@@ -343,7 +343,8 @@ def run(
         valid_labels          = buf_val_lbls.get()
         remove_idx            = buf_inval_lbls.get()
         cc_bboxes             = buf_cc_bboxes.get()
-        if debug_mode: plot_labels = valid_labels.copy()
+        if debug_mode: 
+            plot_labels = valid_labels.copy()
 
         # 初始化傳遞給 Tracking_Process 的 Array
         yolo_bboxes = np.array([])
@@ -809,7 +810,7 @@ def main():
 
         path2rgb     = f"./data/our_videos/rgb/{vid_id}" # path2rgb指向原始的影片
         rgb_cap      = cv2.VideoCapture(path2rgb)
-        frame_count  = int(rgb_cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        frame_count  = int(rgb_cap.get(cv2.CAP_PROP_FRAME_COUNT)) // cfg['frame_interval']
         original_fps = int(rgb_cap.get(cv2.CAP_PROP_FPS))
         height       = int(rgb_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         width        = int(rgb_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
