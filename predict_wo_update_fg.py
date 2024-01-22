@@ -196,6 +196,7 @@ def update_trackinglist(trackinglist_info, y_box):
 
 @smart_inference_mode()
 def run(
+        cfg, 
         # Vid Info.
         video_name,
         frame_count,
@@ -224,7 +225,8 @@ def run(
         save_pth_for_yolo_box = None,
 
         # Thresholds
-        debug_mode    = False,
+        debug_mode        = False,
+        intersect_area_th = 0,
 
         # 以上參數非Yolo原生
         # ---------- ---------- ---------- #
@@ -330,12 +332,12 @@ def run(
 
         if frame_cnter % frame_interval==0: 
             frame_idx = frame_cnter // frame_interval
-        else: continue       
+        else: continue
         
         # ---------- ---------- ---------- # 
 
+        now_rgb_frame = im0s.copy() if not run_yolo_only or debug_mode else None
         if not run_yolo_only: # 存RGB影像給Tracking調用
-            now_rgb_frame = im0s.copy()
             rgb_frames.put(now_rgb_frame, block=True)
 
         # Get BGS datum from buffers
@@ -387,9 +389,10 @@ def run(
             txt_path = str(save_dir / 'labels' / p.stem) + ('' if dataset.mode == 'image' else f'_{frame}')  # im.txt
 
             s += '%gx%g ' % im.shape[2:]  # print string
-            gn = torch.tensor(im0.shape)[[1, 0, 1, 0]]  # normalization gain whwh
-            imc = im0.copy() if save_crop else im0  # for save_crop
-            annotator = Annotator(im0, line_width=line_thickness, example=str(names))
+            # [ 如果要使用Yolo原生輸出請取消以下註解 ]
+            # gn = torch.tensor(im0.shape)[[1, 0, 1, 0]]  # normalization gain whwh
+            # imc = im0.copy() if save_crop else im0  # for save_crop
+            # annotator = Annotator(im0, line_width=line_thickness, example=str(names))
 
             if len(det): # 偵測到物件
 
@@ -431,6 +434,7 @@ def run(
 
                 # ---------- ---------- ---------- #
 
+                pass_intersect_test = True if debug_mode else None
                 for *xyxy, conf, cls in reversed(det[:, :6]):
 
                     '''
@@ -448,23 +452,39 @@ def run(
                                 1. [x, y, w, h] 
                     '''
 
-                    yolo_bboxes = np.append(yolo_bboxes, [int(xyxy[0]), int(xyxy[1]), int(xyxy[2]), int(xyxy[3])])
+                    yolo_bboxes = np.append( yolo_bboxes, [int(xyxy[0]), int(xyxy[1]), int(xyxy[2]), int(xyxy[3])] )
                     yolo_ul, yolo_lr = (int(xyxy[0]), int(xyxy[1])), (int(xyxy[2]), int(xyxy[3]))
+                    yolo_area = (yolo_lr[0] - yolo_ul[0]) * (yolo_lr[1] - yolo_ul[1])
                     
                     for valid_label in valid_labels:
                         cc_bbox = cc_bboxes[valid_label] # x, y, w, h
                         cc_ul, cc_lr = (cc_bbox[0], cc_bbox[1]), (cc_bbox[0]+cc_bbox[2], cc_bbox[1]+cc_bbox[3])
+                        cc_area = cc_bbox[2] * cc_bbox[3]
+
+                        area_minimum = min(yolo_area, cc_area) # 取得 yolo_area, cc_area 的最小者
 
                         intersect_ul, intersect_lr = ( max(yolo_ul[0], cc_ul[0]), max(yolo_ul[1], cc_ul[1]) ), ( min(yolo_lr[0], cc_lr[0]), min(yolo_lr[1], cc_lr[1]) )
                         intersect_area = max(intersect_lr[0]-intersect_ul[0], 0)*max(intersect_lr[1]-intersect_ul[1], 0) # w*h
 
                         # yolo偵測物與連通域進行配對
-                        if not intersect_area==0:
-                            
+                        if intersect_area / area_minimum > intersect_area_th: # 如果交集面積占連通域面積超過一定比例
+
                             remove_idx.append(valid_label)
                             cc_del = np.append(cc_del, [cc_bbox[0], cc_bbox[1], cc_bbox[2], cc_bbox[3]])
 
-                            if debug_mode: plot_labels -= {valid_label}
+                            if debug_mode:
+
+                                plot_labels.discard(valid_label)
+                                
+                                pass_intersect_test = False
+                                cv2.rectangle(now_rgb_frame, yolo_ul, yolo_lr, (0, 255, 0), 2)           # yolo bbox 用綠色標記
+                                cv2.rectangle(now_rgb_frame, cc_ul, cc_lr, (0, 0, 255), 2)               # 連通域用紅色標記
+                                cv2.rectangle(now_rgb_frame, intersect_ul, intersect_lr, (150, 0, 0), 2) # 兩者交集用藍色標記
+                                cv2.putText(now_rgb_frame, f"{intersect_area / cc_area}", (intersect_ul[0], intersect_ul[1] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (150, 0, 0), 2)
+
+                    if debug_mode: 
+                        if not pass_intersect_test:
+                            cv2.imwrite(f"{cfg['del_intersect_area']}/{frame_idx}.png", now_rgb_frame)
 
                     # if save_txt: # Write to file
                     #     xywh = (xyxy2xywh(torch.tensor(xyxy).view(1, 4)) / gn).view(-1).tolist() # normalized xywh
@@ -496,9 +516,10 @@ def run(
             cc_bboxes = np.delete(cc_bboxes, np.unique(remove_idx), axis=0)
             cc_del = cc_del.reshape((-1, 4))
             if run_yolo_only:
-                np.save(f"{save_pth_for_yolo_box}/{frame_idx}.npy", yolo_bboxes)
-                np.save(f"{save_pth_for_res_cc}/{frame_idx}.npy", cc_bboxes)
-                np.save(f"{save_pth_for_del_cc}/{frame_idx}.npy", cc_del)
+                pass
+                # np.save(f"{save_pth_for_yolo_box}/{frame_idx}.npy", yolo_bboxes)
+                # np.save(f"{save_pth_for_res_cc}/{frame_idx}.npy", cc_bboxes)
+                # np.save(f"{save_pth_for_del_cc}/{frame_idx}.npy", cc_del)
             else:
                 cc_bboxes_info.put(cc_bboxes, block=True)
                 cc_del_info.put(cc_del, block=True)
@@ -852,10 +873,11 @@ def main():
                 'save_path': f"{video_name}"
             }
         )
-               
+        
         yolo_process = Process(
             target = run, 
             args = (
+                cfg, 
                 # Vid Info.
                 video_name,
                 frame_count,
@@ -884,7 +906,8 @@ def main():
                 cfg['save_pth_for_yolo_box'],
 
                 # Thresholds
-                cfg['debug_mode']
+                cfg['debug_mode'],
+                cfg['intersect_area_th']
             ), 
             kwargs = {
                 'source': path2rgb

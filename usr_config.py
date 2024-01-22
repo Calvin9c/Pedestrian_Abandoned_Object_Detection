@@ -20,7 +20,7 @@ def get_cfg(video_name):
     cfg = {
         'frame_interval'        : 2, # 介於1~3之間，2為最佳。
         'run_yolo_only'         : True,
-        'debug_mode'            : False,
+        'debug_mode'            : True,
 
         'video_name'            : video_name,
         'save_path_for_dict'    : f"{video_name}/dict",
@@ -30,10 +30,12 @@ def get_cfg(video_name):
 
         'sec_proc_area_th'      : 200, # lightweight_denoise
         'trd_proc_area_th'      : 800, # denoise
+        'intersect_area_th'     : 0.75, # / 0.0
 
         'denoise_fst_proc'      : f"{video_name}/debug/denoise/first_process",
         'denoise_sec_proc'      : f"{video_name}/debug/denoise/second_process",
-        'denoise_trd_proc'      : f"{video_name}/debug/denoise/third_process"
+        'denoise_trd_proc'      : f"{video_name}/debug/denoise/third_process",
+        'del_intersect_area'    : f"{video_name}/debug/check_intersect_area"
     }
     assert 1 <= cfg['frame_interval'] and cfg['frame_interval'] <= 3
 

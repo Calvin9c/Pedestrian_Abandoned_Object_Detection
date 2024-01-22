@@ -20,6 +20,7 @@ def folder_initialization(cfg):
         os.makedirs(cfg['denoise_fst_proc'], exist_ok=True)
         os.makedirs(cfg['denoise_sec_proc'], exist_ok=True)
         os.makedirs(cfg['denoise_trd_proc'], exist_ok=True)
+        os.makedirs(cfg['del_intersect_area'], exist_ok=True)
 
 from tqdm import tqdm
 def modify_video(path2video, save_name=None, save_path="./result_modify_video", resize=False, resize_height=-1, resize_width=-1, frame_interval=1):
@@ -141,7 +142,40 @@ def my_connectedComponentsWithStats(img, area_threshold, debug_mode=False, save_
 
     return denoise_img, img_with_labels, val_lbls, inval_lbls, cc_bboxes
 
-# from concurrent.futures import ProcessPoolExecutor
+def bgs_proc(path2rgb, frame_interval=2, save_path="./", save_name="bgs_result.mp4"):
+    rgb_cap = cv2.VideoCapture(path2rgb)
+
+    if rgb_cap.isOpened():
+        h, w = int(rgb_cap.get(cv2.CAP_PROP_FRAME_HEIGHT)), int(rgb_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        size = (w, h)
+        fps        = rgb_cap.get(cv2.CAP_PROP_FPS)
+        fourcc     = cv2.VideoWriter_fourcc(*"mp4v")
+        videoWrite = cv2.VideoWriter( os.path.join(save_path, save_name) , fourcc, fps, size)
+    else:
+        print(f"Fail to conduct BGS Process.")
+        os._exit(0)
+
+
+    algorithm = bgs.ViBe()
+    while True:
+
+        frame_cnter = int(rgb_cap.get(cv2.CAP_PROP_POS_FRAMES))
+        print(f"frame_cnter: {frame_cnter}")
+        rval, frame = rgb_cap.read()
+
+        if rval:
+
+            if frame_cnter % frame_interval == 0:
+
+                img_output = algorithm.apply(frame)
+                img_bgmodel = algorithm.getBackgroundModel()
+
+                videoWrite.write(cv2.cvtColor(img_output, cv2.COLOR_GRAY2BGR))
+
+        else: break
+    rgb_cap.release()
+    videoWrite.release ()
+
 def bgs_generator(
         
         # input_video
