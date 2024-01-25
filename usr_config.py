@@ -30,7 +30,8 @@ def get_cfg(video_name):
 
         'sec_proc_area_th'      : 200, # lightweight_denoise
         'trd_proc_area_th'      : 800, # denoise
-        'intersect_area_th'     : 0.75, # / 0.0
+        'WpixelTH'              : 0.7,
+        'intersect_area_th'     : 0, # / 0.75
 
         'denoise_fst_proc'      : f"{video_name}/debug/denoise/first_process",
         'denoise_sec_proc'      : f"{video_name}/debug/denoise/second_process",

@@ -206,6 +206,7 @@ def run(
         frame_interval,
 
         # Buffer for BGS Datum
+        buf_bgs_frames    = None,
         buf_img_with_lbls = None,
         buf_val_lbls      = None,
         buf_inval_lbls    = None, 
@@ -226,38 +227,39 @@ def run(
 
         # Thresholds
         debug_mode        = False,
+        WpixelTH          = 0.7,
         intersect_area_th = 0,
 
         # 以上參數非Yolo原生
         # ---------- ---------- ---------- #
         # weights      = ROOT / 'yolov5s-seg.pt',  # model.pt path(s)
         # weights      = ROOT / 'yolov7s-seg.pt',  # model.pt path(s)
-        weights        = 'yolov7-seg.pt',                                                              # model.pt path(s)
-        source         = ROOT / 'data/images',                                                         # file/dir/URL/glob, 0 for webcam
-        data           = ROOT / 'data/coco128.yaml',                                                   # dataset.yaml path
-        imgsz          = (640, 640),                                                                   # inference size (height, width)
-        conf_thres     = 0.25,                                                                         # confidence threshold
-        iou_thres      = 0.45,                                                                         # NMS IOU threshold
-        max_det        = 1000,                                                                         # maximum detections per image
-        device         = '',                                                                           # cuda device, i.e. 0 or 0,1,2,3 or cpu
-        view_img       = False,                                                                        # show results
-        save_txt       = False,                                                                        # save results to *.txt
-        save_conf      = False,                                                                        # save confidences in --save-txt labels
-        save_crop      = False,                                                                        # save cropped prediction boxes
-        nosave         = False,                                                                        # do not save images/videos
-        classes        = [0, 1, 2, 3, 4, 5, 6, 7, 8, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 25, 64],  # filter by class: --class 0, or --class 0 2 3
-        agnostic_nms   = False,                                                                        # class-agnostic NMS
-        augment        = False,                                                                        # augmented inference
-        visualize      = False,                                                                        # visualize features
-        update         = False,                                                                        # update all models
-        project        = ROOT / 'runs/predict-seg',                                                    # save results to project/name
-        name           = 'exp',                                                                        # save results to project/name
-        exist_ok       = False,                                                                        # existing project/name ok, do not increment
-        line_thickness = 3,                                                                            # bounding box thickness (pixels)
-        hide_labels    = False,                                                                        # hide labels
-        hide_conf      = False,                                                                        # hide confidences
-        half           = False,                                                                        # use FP16 half-precision inference
-        dnn            = False                                                                         # use OpenCV DNN for ONNX inference
+        weights        = 'yolov7-seg.pt',                                                                 # model.pt path(s)
+        source         = ROOT / 'data/images',                                                            # file/dir/URL/glob, 0 for webcam
+        data           = ROOT / 'data/coco128.yaml',                                                      # dataset.yaml path
+        imgsz          = (640, 640),                                                                      # inference size (height, width)
+        conf_thres     = 0.25,                                                                            # confidence threshold
+        iou_thres      = 0.45,                                                                            # NMS IOU threshold
+        max_det        = 1000,                                                                            # maximum detections per image
+        device         = '',                                                                              # cuda device, i.e. 0 or 0,1,2,3 or cpu
+        view_img       = False,                                                                           # show results
+        save_txt       = False,                                                                           # save results to *.txt
+        save_conf      = False,                                                                           # save confidences in --save-txt labels
+        save_crop      = False,                                                                           # save cropped prediction boxes
+        nosave         = False,                                                                           # do not save images/videos
+        classes        = [0, 1, 2, 3, 4, 5, 6, 7, 8, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 25, 26, 64], # filter by class: --class 0, or --class 0 2 3
+        agnostic_nms   = False,                                                                           # class-agnostic NMS
+        augment        = False,                                                                           # augmented inference
+        visualize      = False,                                                                           # visualize features
+        update         = False,                                                                           # update all models
+        project        = ROOT / 'runs/predict-seg',                                                       # save results to project/name
+        name           = 'exp',                                                                           # save results to project/name
+        exist_ok       = False,                                                                           # existing project/name ok, do not increment
+        line_thickness = 3,                                                                               # bounding box thickness (pixels)
+        hide_labels    = False,                                                                           # hide labels
+        hide_conf      = False,                                                                           # hide confidences
+        half           = False,                                                                           # use FP16 half-precision inference
+        dnn            = False                                                                            # use OpenCV DNN for ONNX inference
 ):
 
     # 初始化 dict_for_ghost_detect
@@ -341,6 +343,7 @@ def run(
             rgb_frames.put(now_rgb_frame, block=True)
 
         # Get BGS datum from buffers
+        bgs_frame             = buf_bgs_frames.get() # bgs_frame 為單通道，且每個白點已為 255
         bgs_frame_with_labels = buf_img_with_lbls.get()
         valid_labels          = buf_val_lbls.get()
         remove_idx            = buf_inval_lbls.get()
@@ -398,8 +401,9 @@ def run(
 
                 # [ 如果要使用偵測出來每個物體的Mask, 需要取消下下橫列註解 ]
                 # masks[obj_idx] 代表偵測到的第i個物體的mask, type(masks) 為 tensor
-                # masks = process_mask(proto[i], det[:, 6:], det[:, :4], im.shape[2:], upsample=True) # HWC
-                                
+                masks = process_mask(proto[i], det[:, 6:], det[:, :4], im.shape[2:], upsample=True) # HWC
+                num_objs = masks.shape[0]                                                           # torch.tensor.size = (C, H, W) 
+                                                                                                    # masks.shape[0] 代表畫面中有幾個物體
                 # Rescale boxes from img_size to im0 size
                 det[:, :4] = scale_coords(im.shape[2:], det[:, :4], im0.shape).round()
 
@@ -420,27 +424,29 @@ def run(
                 #     s += f"{n} {names[int(c)]}{'s' * (n > 1)}, "  # add to string
 
                 # Mask plotting
-                # [Option 1]
-                # mcolors = [colors(int(cls), True) for cls in det[:, 5]] # 每個類別一種顏色
-                # [Option 2]
-                # num_objs = masks.shape[0] # torch.tensor.size = (C, H, W) # masks.shape[0] 代表畫面中有幾個物體
-                # mcolors = [colors(int(obj_idx), True) for obj_idx in range(num_objs)] # 每個物件一種顏色
-                
-                # im_masks, _ = our_plot_masks(im[i], masks, mcolors) # im_masks, masks_color_summand = our_plot_masks(im[i], masks, mcolors) # image with masks shape(imh,imw,3)
-                # annotator.im = scale_masks(im.shape[2:], im_masks, im0.shape) # scale to original h, w
+                # mcolors = [colors(int(cls), True) for cls in det[:, 5]]                        # [Option 1] 每個類別一種顏色
+                # mcolors = [colors(int(obj_idx), True) for obj_idx in range(num_objs)]          # [Option 2] 每個物件一種顏色
+                # im_masks, masks_color_summand = our_plot_masks(im[i], masks, mcolors)          # image with masks shape(imh,imw,3)
+                # annotator.im                  = scale_masks(im.shape[2:], im_masks, im0.shape) # scale to original h, w
 
                 # [ 如果要使用偵測出來每個物體的Mask, 需要取消下方註解 ]
-                # masks_cpu = our_prcoess_bin_masks(masks, im.shape[2:], im0.shape) # 將每張Masks的Padding部分刪除。type(masks_cpu) = np.ndarray
+                YoloMasks_CPU = our_prcoess_bin_masks(masks, im.shape[2:], im0.shape) # 將每張Masks的Padding部分刪除。type(YoloMasks_CPU) = np.ndarray
+                                                                                      # YoloMasks_CPU.shape = [num_objs, H, W]
+                for obj_idx in range(num_objs):
+                    _, YoloMasks_CPU[obj_idx] = cv2.threshold(YoloMasks_CPU[obj_idx], 0, 255, cv2.THRESH_BINARY)
 
                 # ---------- ---------- ---------- #
 
                 pass_intersect_test = True if debug_mode else None
-                for *xyxy, conf, cls in reversed(det[:, :6]):
+                # for obj_idx, row in enumerate(reversed(det[:, :6])):
+                for obj_idx, row in enumerate(det[:, :6]):
+
+                    *xyxy, conf, cls = row
 
                     '''
                         Note.
-                            obj_cls = names[int(cls)]
-                            obj_mask = masks_cpu[obj_idx]
+                            obj_cls  = names[int(cls)]
+                            obj_mask = YoloMasks_CPU[obj_idx]
 
                             yolo bboxes info.:
                                 1. yolo_bboxes.shape = (num_objs, 4)
@@ -452,22 +458,33 @@ def run(
                                 1. [x, y, w, h] 
                     '''
 
-                    yolo_bboxes = np.append( yolo_bboxes, [int(xyxy[0]), int(xyxy[1]), int(xyxy[2]), int(xyxy[3])] )
+                    yolo_bboxes      = np.append( yolo_bboxes, [int(xyxy[0]), int(xyxy[1]), int(xyxy[2]), int(xyxy[3])] ) # 回傳給 Tracking Process
                     yolo_ul, yolo_lr = (int(xyxy[0]), int(xyxy[1])), (int(xyxy[2]), int(xyxy[3]))
+
+                    YoloSubMask      = YoloMasks_CPU[obj_idx, yolo_ul[1]:yolo_lr[1], yolo_ul[0]:yolo_lr[0]]
+                    BgsSubMask       = bgs_frame[yolo_ul[1]:yolo_lr[1], yolo_ul[0]:yolo_lr[0]]
+
+                    FG_Wpixel = np.count_nonzero( cv2.bitwise_and(YoloSubMask, BgsSubMask) )
+                    BG_Wpixel = np.count_nonzero( YoloSubMask )
+
+                    if BG_Wpixel == 0: 
+                        continue
+                    elif FG_Wpixel / BG_Wpixel < WpixelTH: 
+                        continue 
+
                     yolo_area = (yolo_lr[0] - yolo_ul[0]) * (yolo_lr[1] - yolo_ul[1])
                     
+                    # yolo偵測物與連通域進行配對
                     for valid_label in valid_labels:
-                        cc_bbox = cc_bboxes[valid_label] # x, y, w, h
-                        cc_ul, cc_lr = (cc_bbox[0], cc_bbox[1]), (cc_bbox[0]+cc_bbox[2], cc_bbox[1]+cc_bbox[3])
-                        cc_area = cc_bbox[2] * cc_bbox[3]
 
-                        area_minimum = min(yolo_area, cc_area) # 取得 yolo_area, cc_area 的最小者
+                        cc_bbox      = cc_bboxes[valid_label] # x, y, w, h
+                        cc_ul, cc_lr = (cc_bbox[0], cc_bbox[1]), (cc_bbox[0]+cc_bbox[2], cc_bbox[1]+cc_bbox[3])
+                        cc_area      = cc_bbox[2] * cc_bbox[3]
 
                         intersect_ul, intersect_lr = ( max(yolo_ul[0], cc_ul[0]), max(yolo_ul[1], cc_ul[1]) ), ( min(yolo_lr[0], cc_lr[0]), min(yolo_lr[1], cc_lr[1]) )
                         intersect_area = max(intersect_lr[0]-intersect_ul[0], 0)*max(intersect_lr[1]-intersect_ul[1], 0) # w*h
 
-                        # yolo偵測物與連通域進行配對
-                        if intersect_area / area_minimum > intersect_area_th: # 如果交集面積占連通域面積超過一定比例
+                        if intersect_area / min(yolo_area, cc_area) > intersect_area_th: # 如果交集面積占連通域面積超過一定比例
 
                             remove_idx.append(valid_label)
                             cc_del = np.append(cc_del, [cc_bbox[0], cc_bbox[1], cc_bbox[2], cc_bbox[3]])
@@ -838,6 +855,7 @@ def main():
         rgb_cap.release()
 
         # Create Queue
+        buf_bgs_frames    = Queue(maxsize=100)
         buf_img_with_lbls = Queue(maxsize=100)
         buf_val_lbls      = Queue(maxsize=100)
         buf_inval_lbls    = Queue(maxsize=100)
@@ -859,6 +877,7 @@ def main():
                 cfg['frame_interval'],
 
                 # buf
+                buf_bgs_frames, 
                 buf_img_with_lbls,
                 buf_val_lbls,
                 buf_inval_lbls, 
@@ -887,6 +906,7 @@ def main():
                 cfg['frame_interval'],
 
                 # Buffer for BGS Datum
+                buf_bgs_frames, 
                 buf_img_with_lbls,
                 buf_val_lbls,
                 buf_inval_lbls, 
@@ -907,6 +927,7 @@ def main():
 
                 # Thresholds
                 cfg['debug_mode'],
+                cfg['WpixelTH'],
                 cfg['intersect_area_th']
             ), 
             kwargs = {

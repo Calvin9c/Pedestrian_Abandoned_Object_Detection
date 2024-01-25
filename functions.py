@@ -69,6 +69,40 @@ def modify_video(path2video, save_name=None, save_path="./result_modify_video", 
     
     modified_vid.release()
 
+def bgs_proc(path2rgb, frame_interval=2, save_path="./", save_name="bgs_result.mp4"):
+    rgb_cap = cv2.VideoCapture(path2rgb)
+
+    if rgb_cap.isOpened():
+        h, w = int(rgb_cap.get(cv2.CAP_PROP_FRAME_HEIGHT)), int(rgb_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        size = (w, h)
+        fps        = rgb_cap.get(cv2.CAP_PROP_FPS)
+        fourcc     = cv2.VideoWriter_fourcc(*"mp4v")
+        videoWrite = cv2.VideoWriter( os.path.join(save_path, save_name) , fourcc, fps, size)
+    else:
+        print(f"Fail to conduct BGS Process.")
+        os._exit(0)
+
+
+    algorithm = bgs.ViBe()
+    while True:
+
+        frame_cnter = int(rgb_cap.get(cv2.CAP_PROP_POS_FRAMES))
+        print(f"frame_cnter: {frame_cnter}")
+        rval, frame = rgb_cap.read()
+
+        if rval:
+
+            if frame_cnter % frame_interval == 0:
+
+                img_output = algorithm.apply(frame)
+                img_bgmodel = algorithm.getBackgroundModel()
+
+                videoWrite.write(cv2.cvtColor(img_output, cv2.COLOR_GRAY2BGR))
+
+        else: break
+    rgb_cap.release()
+    videoWrite.release ()
+
 def my_connectedComponentsWithStats(img, area_threshold, debug_mode=False, save_path=None, save_name=None):
 
     # ---------- 處理 input ---------- # 
@@ -142,40 +176,6 @@ def my_connectedComponentsWithStats(img, area_threshold, debug_mode=False, save_
 
     return denoise_img, img_with_labels, val_lbls, inval_lbls, cc_bboxes
 
-def bgs_proc(path2rgb, frame_interval=2, save_path="./", save_name="bgs_result.mp4"):
-    rgb_cap = cv2.VideoCapture(path2rgb)
-
-    if rgb_cap.isOpened():
-        h, w = int(rgb_cap.get(cv2.CAP_PROP_FRAME_HEIGHT)), int(rgb_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        size = (w, h)
-        fps        = rgb_cap.get(cv2.CAP_PROP_FPS)
-        fourcc     = cv2.VideoWriter_fourcc(*"mp4v")
-        videoWrite = cv2.VideoWriter( os.path.join(save_path, save_name) , fourcc, fps, size)
-    else:
-        print(f"Fail to conduct BGS Process.")
-        os._exit(0)
-
-
-    algorithm = bgs.ViBe()
-    while True:
-
-        frame_cnter = int(rgb_cap.get(cv2.CAP_PROP_POS_FRAMES))
-        print(f"frame_cnter: {frame_cnter}")
-        rval, frame = rgb_cap.read()
-
-        if rval:
-
-            if frame_cnter % frame_interval == 0:
-
-                img_output = algorithm.apply(frame)
-                img_bgmodel = algorithm.getBackgroundModel()
-
-                videoWrite.write(cv2.cvtColor(img_output, cv2.COLOR_GRAY2BGR))
-
-        else: break
-    rgb_cap.release()
-    videoWrite.release ()
-
 def bgs_generator(
         
         # input_video
@@ -183,6 +183,7 @@ def bgs_generator(
         frame_interval,
 
         # buf
+        buf_bgs_frames, 
         buf_img_with_lbls,
         buf_val_lbls,
         buf_inval_lbls, 
@@ -219,16 +220,17 @@ def bgs_generator(
                 img_bgmodel = algorithm.getBackgroundModel()
 
                 # save_path 設為 f"{vid_name}", save_name 設為 frame_idx
-                img_with_labels, val_lbls, inval_lbls, cc_bboxes = denoise(
-                                                                        img_output, 
-                                                                        kernel, 
-                                                                        debug_mode, 
-                                                                        save_path, 
-                                                                        frame_idx, 
-                                                                        sec_proc_area_th, 
-                                                                        trd_proc_area_th
-                                                                    )
+                bgs_frame, img_with_labels, val_lbls, inval_lbls, cc_bboxes = denoise(
+                                                                                img_output, 
+                                                                                kernel, 
+                                                                                debug_mode, 
+                                                                                save_path, 
+                                                                                frame_idx, 
+                                                                                sec_proc_area_th, 
+                                                                                trd_proc_area_th
+                                                                            )
 
+                buf_bgs_frames.put( bgs_frame, block=True )
                 buf_img_with_lbls.put( img_with_labels, block=True )
                 buf_val_lbls.put( val_lbls, block=True )
                 buf_inval_lbls.put( inval_lbls, block=True )
@@ -257,11 +259,35 @@ def denoise(img, kernel, debug_mode=False, save_path=None, save_name=None, sec_p
     bgs_frame = cv2.dilate(bgs_frame, kernel, iterations=3)
 
     # third_process: 刪除大的雜訊
-    _, img_with_labels, val_lbls, inval_lbls, cc_bboxes = my_connectedComponentsWithStats(bgs_frame, trd_proc_area_th, debug_mode, f"{save_path}/debug/denoise/third_process", save_name)
+    bgs_frame, img_with_labels, val_lbls, inval_lbls, cc_bboxes = my_connectedComponentsWithStats(bgs_frame, trd_proc_area_th, debug_mode, f"{save_path}/debug/denoise/third_process", save_name)
 
-    return img_with_labels, set(val_lbls), inval_lbls, cc_bboxes
+    return bgs_frame, img_with_labels, set(val_lbls), inval_lbls, cc_bboxes
 
+def process_masks_parallel_merge(AMask, BMasks):
+    def process_single_frame(AMask, BMask):
+        AMaskCopy = np.copy(AMask)
+        return cv2.bitwise_xor(AMaskCopy, cv2.bitwise_and(AMaskCopy, BMask))
 
+    def pairwise_merge(results):
+        with ThreadPoolExecutor() as executor:
+            merged_results = list(executor.map(
+                                    lambda pair: cv2.bitwise_and(pair[0], pair[1]), 
+                                                 [results[i:i+2] for i in range(0, len(results), 2)]
+                             ))
+        return merged_results
+
+    # Step 1: Parallel processing of each BMask
+    with ThreadPoolExecutor() as executor:
+        results = list(executor.map(lambda BMask: process_single_frame(AMask, BMask), BMasks))
+
+    # Step 2: Pairwise bitwise_and to merge results (parallelized)
+    while len(results) > 1:
+        if len(results) % 2 != 0:  # For odd number of elements, keep the last one for the next round
+            results = pairwise_merge(results[:-1]) + [results[-1]]
+        else:
+            results = pairwise_merge(results)
+
+    return results[0] if results else None
 
 
 
