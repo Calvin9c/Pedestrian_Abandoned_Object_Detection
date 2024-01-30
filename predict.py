@@ -450,7 +450,7 @@ def run(
                                                                                                  # annotator.im()是原圖套上mask的圖片, 尚未補上BBOX，但是大小已經和原圖相同
 
                 pass_intersect_test = True if debug_mode else None
-                for obj_idx, row in enumerate(det[:, :6]):
+                for obj_idx, row in enumerate(reversed(det[:, :6])):
 
                     *xyxy, conf, cls = row
 
