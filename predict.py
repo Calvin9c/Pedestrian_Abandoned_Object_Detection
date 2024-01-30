@@ -339,6 +339,7 @@ def run(
         # ---------- ---------- ---------- # 
 
         now_rgb_frame = im0s.copy() if not run_yolo_only or debug_mode else None
+
         if not run_yolo_only: # 存RGB影像給Tracking調用
             rgb_frames.put(now_rgb_frame, block=True)
 
@@ -438,8 +439,7 @@ def run(
                 # ---------- ---------- ---------- #
 
                 pass_intersect_test = True if debug_mode else None
-                # for obj_idx, row in enumerate(reversed(det[:, :6])):
-                for obj_idx, row in enumerate(det[:, :6]):
+                for obj_idx, row in enumerate(reversed(det[:, :6])):
 
                     *xyxy, conf, cls = row
 
@@ -533,10 +533,10 @@ def run(
             cc_bboxes = np.delete(cc_bboxes, np.unique(remove_idx), axis=0)
             cc_del = cc_del.reshape((-1, 4))
             if run_yolo_only:
-                pass
-                # np.save(f"{save_pth_for_yolo_box}/{frame_idx}.npy", yolo_bboxes)
-                # np.save(f"{save_pth_for_res_cc}/{frame_idx}.npy", cc_bboxes)
-                # np.save(f"{save_pth_for_del_cc}/{frame_idx}.npy", cc_del)
+                # pass
+                np.save(f"{save_pth_for_yolo_box}/{frame_idx}.npy", yolo_bboxes)
+                np.save(f"{save_pth_for_res_cc}/{frame_idx}.npy", cc_bboxes)
+                np.save(f"{save_pth_for_del_cc}/{frame_idx}.npy", cc_del)
             else:
                 cc_bboxes_info.put(cc_bboxes, block=True)
                 cc_del_info.put(cc_del, block=True)
